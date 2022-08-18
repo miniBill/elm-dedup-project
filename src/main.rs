@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    fs, io,
-    process::{Command, ExitStatus},
-};
+use std::{collections::HashMap, fs, io, process::Command};
 
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
@@ -43,20 +39,31 @@ async fn main() -> Result<(), Error> {
     packages
         .into_par_iter()
         .map(|(package, versions)| {
-            if let [author, name] = package.split("/").collect::<Vec<&str>>()[..] {
+            if let [author, _name] = package.split("/").collect::<Vec<&str>>()[..] {
                 let last_version: &String = &versions[versions.len() - 1];
-                println!("Cloning {}/{} {}", author, name, last_version);
+                println!("Cloning {package}@{last_version} in {package}");
 
                 fs::create_dir_all(format!("repos/{author}"))?;
 
-                // git clone -b '2.0' --depth 1 URL
-                let url: String = format!("https://github.com/{package}.git");
-                let exit_status: ExitStatus = Command::new("git")
-                    .args(["clone", "-b", last_version, "--depth", "1", &url])
+                let url: String = format!("git@github.com:{package}.git");
+                let is_ok: bool = Command::new("git")
+                    .args([
+                        "clone",
+                        "-b",
+                        last_version,
+                        "--depth",
+                        "1",
+                        &url,
+                        &format!("repos/{package}"),
+                    ])
                     .spawn()?
-                    .wait()?;
-
-                Ok(())
+                    .wait()?
+                    .success();
+                if !is_ok {
+                    Err(format!("!!! Error cloning {package}").into())
+                } else {
+                    Ok(())
+                }
             } else {
                 Err(format!("Could not parse {} as author/package-name", package).into())
             }
