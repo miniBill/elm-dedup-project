@@ -1,4 +1,8 @@
-use std::{collections::HashMap, fs, io};
+use std::{
+    collections::HashMap,
+    fs, io,
+    process::{Command, ExitStatus},
+};
 
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
@@ -36,7 +40,7 @@ async fn main() -> Result<(), Error> {
             .json()
             .await?;
 
-    let results: Vec<()> = packages
+    packages
         .into_par_iter()
         .map(|(package, versions)| {
             if let [author, name] = package.split("/").collect::<Vec<&str>>()[..] {
@@ -44,18 +48,20 @@ async fn main() -> Result<(), Error> {
                 println!("Cloning {}/{} {}", author, name, last_version);
 
                 fs::create_dir_all(format!("repos/{author}"))?;
+
+                // git clone -b '2.0' --depth 1 URL
+                let url: String = format!("https://github.com/{package}.git");
+                let exit_status: ExitStatus = Command::new("git")
+                    .args(["clone", "-b", last_version, "--depth", "1", &url])
+                    .spawn()?
+                    .wait()?;
+
                 Ok(())
             } else {
                 Err(format!("Could not parse {} as author/package-name", package).into())
             }
         })
         .collect::<Result<_, Error>>()?;
-
-    let repo_name: &str = "git/git";
-    let url: String = format!("https://github.com/{repo_name}.git");
-
-    // git clone -b '2.0' --depth 1 URL
-    println!("git clone -b '2.0' --depth 1 {}", url);
 
     Ok(())
 }
