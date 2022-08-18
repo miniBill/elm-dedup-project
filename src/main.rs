@@ -33,6 +33,12 @@ struct Package {
     version: String,
 }
 
+enum CloneStatus {
+    Cloned,
+    AlreadyPresent,
+    Error,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     println!("Getting packages list");
@@ -41,12 +47,12 @@ async fn main() -> Result<(), Error> {
         .json()
         .await?;
 
-    packages
+    let result: Vec<CloneStatus> = packages
         .into_par_iter()
         .map(|package| {
             let package_name = package.name;
             if Path::new(&format!("repos/{package_name}")).exists() {
-                return Ok(());
+                return Ok(CloneStatus::AlreadyPresent);
             }
 
             let author: &str =
@@ -63,6 +69,7 @@ async fn main() -> Result<(), Error> {
 
             fs::create_dir_all(format!("repos/{author}"))?;
 
+            // Use git URL to avoid username/password prompts
             let url: String = format!("git@github.com:{package_name}.git");
             let is_ok: bool = Command::new("git")
                 .args([
@@ -80,12 +87,21 @@ async fn main() -> Result<(), Error> {
                 .success();
             if !is_ok {
                 println!("!!! Error cloning {package_name}");
-                return Ok(());
+                return Ok(CloneStatus::Error);
             }
 
-            Ok(())
+            Ok(CloneStatus::Cloned)
         })
         .collect::<Result<_, Error>>()?;
+
+    let (present, cloned, error) = result
+        .iter()
+        .fold((0, 0, 0), |(present, cloned, error), r| match r {
+            CloneStatus::Cloned => (present, cloned + 1, error),
+            CloneStatus::AlreadyPresent => (present + 1, cloned, error),
+            CloneStatus::Error => (present, cloned, error + 1),
+        });
+    println!("Cloned {cloned}, errored {error}, already present {present}");
 
     Ok(())
 }
