@@ -1,6 +1,6 @@
-use std::{collections::HashMap, fs, io, process::Command};
-
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use serde::Deserialize;
+use std::{fs, io, path::Path, process::Command};
 
 #[derive(Debug)]
 enum Error {
@@ -27,46 +27,63 @@ impl From<String> for Error {
     }
 }
 
+#[derive(Deserialize)]
+struct Package {
+    name: String,
+    version: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
     println!("Getting packages list");
-    let packages: HashMap<String, Vec<String>> =
-        reqwest::get("https://package.elm-lang.org/all-packages")
-            .await?
-            .json()
-            .await?;
+    let packages: Vec<Package> = reqwest::get("https://package.elm-lang.org/search.json")
+        .await?
+        .json()
+        .await?;
 
     packages
         .into_par_iter()
-        .map(|(package, versions)| {
-            if let [author, _name] = package.split("/").collect::<Vec<&str>>()[..] {
-                let last_version: &String = &versions[versions.len() - 1];
-                println!("Cloning {package}@{last_version} in {package}");
-
-                fs::create_dir_all(format!("repos/{author}"))?;
-
-                let url: String = format!("git@github.com:{package}.git");
-                let is_ok: bool = Command::new("git")
-                    .args([
-                        "clone",
-                        "-b",
-                        last_version,
-                        "--depth",
-                        "1",
-                        &url,
-                        &format!("repos/{package}"),
-                    ])
-                    .spawn()?
-                    .wait()?
-                    .success();
-                if !is_ok {
-                    Err(format!("!!! Error cloning {package}").into())
-                } else {
-                    Ok(())
-                }
-            } else {
-                Err(format!("Could not parse {} as author/package-name", package).into())
+        .map(|package| {
+            let package_name = package.name;
+            if Path::new(&format!("repos/{package_name}")).exists() {
+                return Ok(());
             }
+
+            let author: &str =
+                if let [author, _name] = package_name.split("/").collect::<Vec<&str>>()[..] {
+                    author
+                } else {
+                    return Err(
+                        format!("Could not parse {} as author/package-name", package_name).into(),
+                    );
+                };
+
+            let package_version: &String = &package.version;
+            println!("Cloning {package_name}@{package_version}");
+
+            fs::create_dir_all(format!("repos/{author}"))?;
+
+            let url: String = format!("git@github.com:{package_name}.git");
+            let is_ok: bool = Command::new("git")
+                .args([
+                    "clone",
+                    "--quiet",
+                    "--branch",
+                    package_version,
+                    "--depth",
+                    "1",
+                    &url,
+                    &format!("repos/{package_name}"),
+                ])
+                .spawn()?
+                .wait()?
+                .success();
+            if !is_ok {
+                println!("!!! Error cloning {package_name}");
+                return Ok(());
+            }
+
+            Ok(())
         })
         .collect::<Result<_, Error>>()?;
 
