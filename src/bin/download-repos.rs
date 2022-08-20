@@ -64,6 +64,10 @@ async fn main() -> Result<(), Error> {
                     );
                 };
 
+            // (if/let/case).a
+            // { foo }.a
+            // if item.name == "foo" then if item.name == "bar" then foo else bar else baz
+
             let package_version: &String = &package.version;
             println!("Cloning {package_name}@{package_version}");
 
