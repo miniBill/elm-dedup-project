@@ -4,7 +4,7 @@ use std::{
     fs::{self, ReadDir},
     io,
     process::Command,
-    sync::atomic::{self, AtomicU32, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
 };
 
 #[derive(Debug)]
