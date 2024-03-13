@@ -1,3 +1,4 @@
+use colored::*;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use serde::Deserialize;
 use std::{fs, io, path::Path, process::Command};
@@ -41,7 +42,7 @@ enum CloneStatus {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    println!("Getting packages list");
+    println!("{}", "Getting packages list".blue());
     let packages: Vec<Package> = reqwest::get("https://package.elm-lang.org/search.json")
         .await?
         .json()
@@ -49,8 +50,8 @@ async fn main() -> Result<(), Error> {
 
     let result: Vec<CloneStatus> = packages
         .into_par_iter()
-        .map(|package| {
-            let package_name = package.name;
+        .map(|package: Package| {
+            let package_name: String = package.name;
             if Path::new(&format!("repos/{package_name}")).exists() {
                 return Ok(CloneStatus::AlreadyPresent);
             }
@@ -69,7 +70,12 @@ async fn main() -> Result<(), Error> {
             // if item.name == "foo" then if item.name == "bar" then foo else bar else baz
 
             let package_version: &String = &package.version;
-            println!("Cloning {package_name}@{package_version}");
+            println!(
+                "{} {}@{}",
+                "Cloning".green(),
+                package_name.blue(),
+                package_version.blue()
+            );
 
             fs::create_dir_all(format!("repos/{author}"))?;
 
@@ -90,7 +96,8 @@ async fn main() -> Result<(), Error> {
                 .wait()?
                 .success();
             if !is_ok {
-                println!("!!! Error cloning {package_name}");
+                println!("{} {}", "!!! Error cloning ".red(), package_name.blue());
+
                 return Ok(CloneStatus::Error);
             }
 
@@ -105,7 +112,10 @@ async fn main() -> Result<(), Error> {
             CloneStatus::AlreadyPresent => (present + 1, cloned, error),
             CloneStatus::Error => (present, cloned, error + 1),
         });
-    println!("Cloned {cloned}, errored {error}, already present {present}");
+    println!(
+        "{}",
+        format!("Cloned {cloned}, errored {error}, already present {present}").green(),
+    );
 
     Ok(())
 }
