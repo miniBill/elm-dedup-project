@@ -52,24 +52,12 @@ async fn main() -> Result<(), Error> {
         .into_par_iter()
         .map(|package: Package| {
             let package_name: String = package.name;
-            if Path::new(&format!("repos/{package_name}")).exists() {
+            let package_version: String = package.version;
+
+            if Path::new(&format!("repos/{package_name}/{package_version}")).exists() {
                 return Ok(CloneStatus::AlreadyPresent);
             }
 
-            let author: &str =
-                if let [author, _name] = package_name.split("/").collect::<Vec<&str>>()[..] {
-                    author
-                } else {
-                    return Err(
-                        format!("Could not parse {} as author/package-name", package_name).into(),
-                    );
-                };
-
-            // (if/let/case).a
-            // { foo }.a
-            // if item.name == "foo" then if item.name == "bar" then foo else bar else baz
-
-            let package_version: &String = &package.version;
             println!(
                 "{} {}@{}",
                 "Cloning".green(),
@@ -77,7 +65,7 @@ async fn main() -> Result<(), Error> {
                 package_version.blue()
             );
 
-            fs::create_dir_all(format!("repos/{author}"))?;
+            fs::create_dir_all(format!("repos/{package_name}"))?;
 
             // Use git URL to avoid username/password prompts
             let url: String = format!("git@github.com:{package_name}.git");
@@ -86,11 +74,11 @@ async fn main() -> Result<(), Error> {
                     "clone",
                     "--quiet",
                     "--branch",
-                    package_version,
+                    &package_version,
                     "--depth",
                     "1",
                     &url,
-                    &format!("repos/{package_name}"),
+                    &format!("repos/{package_name}/{package_version}"),
                 ])
                 .spawn()?
                 .wait()?
