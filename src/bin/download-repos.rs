@@ -68,7 +68,7 @@ async fn main() -> Result<(), Error> {
             fs::create_dir_all(format!("repos/{package_name}"))?;
 
             // Use git URL to avoid username/password prompts
-            let url: String = format!("git@github.com:{package_name}.git");
+            let url: String = format!("git@github.com:{package_name}");
             let is_ok: bool = Command::new("git")
                 .args([
                     "clone",
@@ -80,6 +80,7 @@ async fn main() -> Result<(), Error> {
                     &url,
                     &format!("repos/{package_name}/{package_version}"),
                 ])
+                .env("GIT_SSH_COMMAND", "ssh -o ControlPath=none")
                 .spawn()?
                 .wait()?
                 .success();
