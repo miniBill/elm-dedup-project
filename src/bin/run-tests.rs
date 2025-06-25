@@ -340,6 +340,8 @@ fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
         "elm-test"
     };
 
+    fs::remove_dir_all(path.join("elm-stuff"))?;
+
     let elm_result: bool = Command::new("npx")
         .args(["--yes", elm_test_version, "--compiler", "elm"])
         .current_dir(&path)
@@ -348,6 +350,8 @@ fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
         .spawn()?
         .wait()?
         .success();
+
+    fs::remove_dir_all(path.join("elm-stuff"))?;
 
     let lamdera_result: bool = Command::new("npx")
         .args(["--yes", elm_test_version, "--compiler", "lamdera"])
