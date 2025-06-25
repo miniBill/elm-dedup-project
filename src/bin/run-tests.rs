@@ -74,7 +74,7 @@ enum RunResult {
     TimedOut,
 }
 
-const CONCURRENCY: u16 = 4;
+const CONCURRENCY: u16 = 10;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
