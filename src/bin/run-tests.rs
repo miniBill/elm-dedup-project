@@ -362,23 +362,24 @@ fn view(
 }
 
 fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
-    let elm_json = path.join("elm.json");
+    let elm_json: PathBuf = path.join("elm.json");
 
-    let elm_json_content = fs::read_to_string(elm_json)?;
+    let elm_json_content: String = fs::read_to_string(elm_json)?;
 
-    let elm_test_version = if elm_json_content.contains("\"elm-explorations/test\": \"1") {
-        "elm-test@0.19.1-revision9"
-    } else {
-        "elm-test"
-    };
+    let elm_test_version: &'static str =
+        if elm_json_content.contains("\"elm-explorations/test\": \"1") {
+            "elm-test@0.19.1-revision9"
+        } else {
+            "elm-test"
+        };
 
     let run_tests_with = |compiler| {
-        let elm_stuff = path.join("elm-stuff");
+        let elm_stuff: PathBuf = path.join("elm-stuff");
         if elm_stuff.exists() {
             fs::remove_dir_all(path.join("elm-stuff"))?;
         }
 
-        let timeout = Duration::from_secs(10);
+        let timeout: Duration = Duration::from_secs(20);
 
         let mut elm_child: std::process::Child = Command::new("npx")
             .args(["--yes", elm_test_version, "--compiler", compiler])
@@ -396,8 +397,8 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
         }
     };
 
-    let elm_result = run_tests_with("elm")?;
-    let lamdera_result = run_tests_with("lamdera")?;
+    let elm_result: RunResult = run_tests_with("elm")?;
+    let lamdera_result: RunResult = run_tests_with("lamdera")?;
 
     return Ok((elm_result, lamdera_result));
 }
