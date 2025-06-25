@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 use tokio::{task::JoinHandle, time::Instant};
+use wait_timeout::ChildExt;
 
 #[derive(Debug)]
 enum Error {
@@ -63,8 +64,14 @@ impl From<&'static str> for Error {
 struct Done {
     path: PathBuf,
     time: Duration,
-    elm_result: bool,
-    lamdera_result: bool,
+    elm_result: RunResult,
+    lamdera_result: RunResult,
+}
+
+#[derive(Clone, PartialEq)]
+enum RunResult {
+    Finished(bool),
+    TimedOut,
 }
 
 #[tokio::main]
@@ -132,7 +139,7 @@ async fn main() -> Result<(), Error> {
                     .expect("Could not lock \"in_progress\"")
                     .insert(version_root.clone(), start);
 
-                let res: Result<(bool, bool), Error> = check_tests_for(&version_root);
+                let res: Result<(RunResult, RunResult), Error> = check_tests_for(&version_root);
 
                 in_progress
                     .lock()
@@ -244,22 +251,21 @@ async fn main() -> Result<(), Error> {
                             1
                         }
                     });
+                    fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
+                        match result {
+                            RunResult::Finished(true) => text::Line::raw("✅").centered(),
+                            RunResult::Finished(false) => text::Line::raw("❌").centered(),
+                            RunResult::TimedOut => text::Line::raw("⏰").centered(),
+                        }
+                    }
                     let done_table: widgets::Table<'_> = widgets::Table::new(
                         done_list
                             .into_iter()
                             .map(|done| {
                                 widgets::Row::new(vec![
                                     text::Line::raw(format!("{}", done.path.display())),
-                                    if done.elm_result {
-                                        text::Line::raw("✅").centered()
-                                    } else {
-                                        text::Line::raw("❌").centered()
-                                    },
-                                    if done.lamdera_result {
-                                        text::Line::raw("✅").centered()
-                                    } else {
-                                        text::Line::raw("❌").centered()
-                                    },
+                                    view_done_result(done.elm_result),
+                                    view_done_result(done.lamdera_result),
                                     text::Line::raw(format!("{}s", done.time.as_secs()))
                                         .right_aligned(),
                                 ])
@@ -329,7 +335,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
+fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     let elm_json = path.join("elm.json");
 
     let elm_json_content = fs::read_to_string(elm_json)?;
@@ -340,27 +346,28 @@ fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
         "elm-test"
     };
 
-    fs::remove_dir_all(path.join("elm-stuff"))?;
+    let run_tests_with = |compiler| {
+        fs::remove_dir_all(path.join("elm-stuff"))?;
+        let timeout = Duration::from_secs(10);
 
-    let elm_result: bool = Command::new("npx")
-        .args(["--yes", elm_test_version, "--compiler", "elm"])
-        .current_dir(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?
-        .wait()?
-        .success();
+        let mut elm_child: std::process::Child = Command::new("npx")
+            .args(["--yes", elm_test_version, "--compiler", compiler])
+            .current_dir(&path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
 
-    fs::remove_dir_all(path.join("elm-stuff"))?;
+        match elm_child.wait_timeout(timeout)? {
+            Some(status) => Ok::<RunResult, Error>(RunResult::Finished(status.success())),
+            None => {
+                elm_child.kill()?;
+                Ok(RunResult::TimedOut)
+            }
+        }
+    };
 
-    let lamdera_result: bool = Command::new("npx")
-        .args(["--yes", elm_test_version, "--compiler", "lamdera"])
-        .current_dir(&path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?
-        .wait()?
-        .success();
+    let elm_result = run_tests_with("elm")?;
+    let lamdera_result = run_tests_with("lamdera")?;
 
     return Ok((elm_result, lamdera_result));
 }
