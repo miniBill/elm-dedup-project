@@ -9,7 +9,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
     time::Duration,
 };
 use tokio::{task::JoinHandle, time::Instant};
@@ -222,6 +222,8 @@ async fn main() -> Result<(), Error> {
 
             ratatui::restore();
 
+            println!("Waiting for children to exit...");
+
             res
         })
     };
@@ -254,29 +256,47 @@ fn view(
     in_progress: &Arc<Mutex<HashMap<PathBuf, tokio::time::Instant>>>,
     dones: &Arc<Mutex<Vec<Done>>>,
 ) {
+    let summary_block = widgets::Block::default()
+        .title(" Summary ")
+        .border_style(style::Style::default().fg(style::Color::Blue))
+        .border_type(widgets::BorderType::Rounded)
+        .borders(widgets::Borders::ALL);
+
     let summary_table: widgets::Table<'_> = widgets::Table::new(
-        vec![
-            widgets::Row::new(vec!["Pending".into(), format!("{}", paths_receiver.len())]),
-            widgets::Row::new(vec![
-                "In progress".into(),
-                format!(
+        [
+            widgets::Row::new([
+                text::Line::raw("Pending"),
+                text::Line::raw(format!("{}", paths_receiver.len())).right_aligned(),
+            ]),
+            widgets::Row::new([
+                text::Line::raw("In progress"),
+                text::Line::raw(format!(
                     "{}",
                     in_progress
                         .lock()
                         .expect("Could not lock \"in_progress\"")
                         .len()
-                ),
+                ))
+                .right_aligned(),
             ]),
         ],
-        vec![layout::Constraint::Fill(1), layout::Constraint::Length(5)],
-    )
-    .block(
-        widgets::Block::default()
-            .title(" Summary ")
-            .border_style(style::Style::default().fg(style::Color::Blue))
-            .border_type(widgets::BorderType::Rounded)
-            .borders(widgets::Borders::ALL),
+        [layout::Constraint::Fill(1), layout::Constraint::Length(5)],
     );
+
+    let total: usize = dones.lock().expect("Could not lock \"dones\"").len()
+        + in_progress
+            .lock()
+            .expect("Could not lock \"in_progress\"")
+            .len()
+        + paths_receiver.len();
+    let progress: f64 = if total == 0 {
+        0.0
+    } else {
+        dones.lock().expect("Could not lock \"dones\"").len() as f64 / total as f64
+    };
+    let summary_gauge: widgets::Gauge<'_> = widgets::Gauge::default()
+        .ratio(progress)
+        .gauge_style(style::Color::Blue);
 
     let in_progress_table: widgets::Table<'_> = widgets::Table::new(
         in_progress
@@ -284,7 +304,7 @@ fn view(
             .expect("Could not lock \"in_progress\"")
             .iter()
             .map(|(path, instant)| {
-                widgets::Row::new(vec![
+                widgets::Row::new([
                     format!("{}", path.display()),
                     format!("{:>9}s", instant.elapsed().as_secs()),
                 ])
@@ -325,7 +345,7 @@ fn view(
         done_list
             .into_iter()
             .map(|done| {
-                widgets::Row::new(vec![
+                widgets::Row::new([
                     text::Line::raw(format!("{}", done.path.display())),
                     view_done_result(done.elm_result),
                     view_done_result(done.lamdera_result),
@@ -350,13 +370,25 @@ fn view(
     );
 
     let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
-        layout::Constraint::Length(3),
+        layout::Constraint::Length(5),
         layout::Constraint::Length(2 + CONCURRENCY),
         layout::Constraint::Fill(1),
     ])
     .split(frame.area());
 
-    frame.render_widget(summary_table, layout[0]);
+    let summary_sublayout = layout::Layout::vertical([
+        layout::Constraint::Length(2), // Table
+        layout::Constraint::Length(1), // Gauge
+    ])
+    .split(layout[0].inner(layout::Margin {
+        horizontal: 1,
+        vertical: 1,
+    }));
+
+    frame.render_widget(summary_block, layout[0]);
+    frame.render_widget(summary_table, summary_sublayout[0]);
+    frame.render_widget(summary_gauge, summary_sublayout[1]);
+
     frame.render_widget(in_progress_table, layout[1]);
     frame.render_widget(done_table, layout[2]);
 }
