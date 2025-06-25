@@ -64,7 +64,7 @@ async fn main() -> Result<(), Error> {
             if tests.exists() && elm_json.exists() {
                 check_tests_for(version_root)
             } else {
-                Ok(())
+                Ok(true)
             }
         })
         .collect::<Result<Vec<_>, Error>>()?;
@@ -72,7 +72,7 @@ async fn main() -> Result<(), Error> {
     Ok(())
 }
 
-fn check_tests_for(path: PathBuf) -> Result<(), Error> {
+fn check_tests_for(path: PathBuf) -> Result<bool, Error> {
     println!("{}", path.display());
 
     let elm_json = path.join("elm.json");
@@ -93,14 +93,6 @@ fn check_tests_for(path: PathBuf) -> Result<(), Error> {
         .spawn()?
         .wait()?
         .success();
-    if !is_vanilla_ok {
-        println!(
-            "{} {}",
-            "!!! Error running tests in".yellow(),
-            format!("{}", path.display()).blue()
-        );
-        return Ok(());
-    }
 
     let is_lamdera_ok: bool = Command::new("npx")
         .args(["--yes", elm_test_version, "--compiler", "lamdera"])
@@ -110,7 +102,8 @@ fn check_tests_for(path: PathBuf) -> Result<(), Error> {
         .spawn()?
         .wait()?
         .success();
-    if !is_lamdera_ok {
+
+    if is_lamdera_ok != is_vanilla_ok {
         // Re-run the tests to show the output
         let _ = Command::new("npx")
             .args(["--yes", elm_test_version, "--compiler", "lamdera"])
@@ -121,13 +114,13 @@ fn check_tests_for(path: PathBuf) -> Result<(), Error> {
 
         println!(
             "{} {}",
-            "!!! Error running tests in".red(),
+            "!!! Difference in test results between elm and lamdera in".red(),
             format!("{}", path.display()).blue()
         );
         return Err("There is a compiler bug!".into());
     }
 
-    return Ok(());
+    return Ok(true);
 }
 
 fn read_dir<T>(path: T) -> Result<Vec<PathBuf>, Error>
