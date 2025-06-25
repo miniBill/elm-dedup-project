@@ -9,7 +9,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{task::JoinHandle, time::Instant};
@@ -82,15 +82,13 @@ async fn main() -> Result<(), Error> {
         async_channel::Sender<PathBuf>,
         async_channel::Receiver<PathBuf>,
     ) = async_channel::unbounded();
-    let (done_sender, done_receiver): (async_channel::Sender<Done>, async_channel::Receiver<Done>) =
-        async_channel::unbounded();
     let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let dones: Arc<Mutex<Vec<Done>>> = Arc::new(Mutex::new(Vec::new()));
 
     let stopping: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
     let walker: JoinHandle<Result<(), Error>> = {
-        let stopping: Arc<Mutex<bool>> = Arc::clone(&stopping);
+        let stopping: Arc<Mutex<bool>> = stopping.clone();
         tokio::spawn(async move {
             let paths: Result<(), Error> = (async || {
                 let repos = Path::new("repos");
@@ -118,10 +116,10 @@ async fn main() -> Result<(), Error> {
 
     let mut testers: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
     for _i in 0..CONCURRENCY {
-        let stopping: Arc<Mutex<bool>> = Arc::clone(&stopping);
+        let stopping: Arc<Mutex<bool>> = stopping.clone();
         let paths_receiver: async_channel::Receiver<PathBuf> = paths_receiver.clone();
-        let done_sender: async_channel::Sender<Done> = done_sender.clone();
         let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = in_progress.clone();
+        let dones: Arc<Mutex<Vec<Done>>> = dones.clone();
         let tester: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
             loop {
                 if *stopping.lock().expect("Could not lock \"stopping\"") {
@@ -148,45 +146,25 @@ async fn main() -> Result<(), Error> {
 
                 let (elm_result, lamdera_result) = res?;
 
-                // If we have a send error it's because we're done, no need to deal with it
-                let _ = done_sender
-                    .send(Done {
-                        path: version_root,
-                        time: start.elapsed(),
-                        elm_result,
-                        lamdera_result,
-                    })
-                    .await;
+                dones.lock().expect("Could not lock \"dones\"").push(Done {
+                    path: version_root,
+                    time: start.elapsed(),
+                    elm_result,
+                    lamdera_result,
+                });
             }
         });
         testers.push(tester);
     }
 
-    let consumer: JoinHandle<Result<(), Error>> = {
-        let stopping = Arc::clone(&stopping);
-        let dones = Arc::clone(&dones);
-        tokio::spawn(async move {
-            loop {
-                if *stopping.lock().expect("Could not lock \"stopping\"") {
-                    return Ok(());
-                }
-
-                let done = match done_receiver.recv_blocking() {
-                    Ok(done) => done,
-                    Err(async_channel::RecvError) => return Ok(()),
-                };
-
-                dones.lock().expect("Could not lock \"dones\"").push(done);
-            }
-        })
-    };
-
     let tui: JoinHandle<Result<(), Error>> = {
-        let stopping = Arc::clone(&stopping);
+        let stopping: Arc<Mutex<bool>> = stopping.clone();
         tokio::spawn(async move {
             color_eyre::install()?;
             let res: Result<(), Error> = (|| {
                 let mut terminal: ratatui::Terminal<_> = ratatui::init();
+
+                let start: Instant = Instant::now();
 
                 loop {
                     if *stopping.lock().expect("Could not lock \"stopping\"") {
@@ -194,7 +172,13 @@ async fn main() -> Result<(), Error> {
                     }
 
                     terminal.draw(|frame: &mut ratatui::Frame| {
-                        view(frame, &paths_receiver, &in_progress, &dones);
+                        view(
+                            frame,
+                            &paths_receiver,
+                            &in_progress,
+                            &dones,
+                            start.elapsed(),
+                        );
                     })?;
 
                     if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60))
@@ -222,30 +206,28 @@ async fn main() -> Result<(), Error> {
 
             ratatui::restore();
 
-            println!("Waiting for children to exit...");
-
             res
         })
     };
 
+    if let Err(e) = tui.await? {
+        *stopping.lock().expect("Could not lock \"stopping\"") = true;
+        return Err(e);
+    };
+
+    println!("Waiting for directory walker to exit.");
     if let Err(e) = walker.await? {
         *stopping.lock().expect("Could not lock \"stopping\"") = true;
         return Err(e);
     };
+
+    println!("Waiting for testers to exit.");
     for tester in testers {
         if let Err(e) = tester.await? {
             *stopping.lock().expect("Could not lock \"stopping\"") = true;
             return Err(e);
         }
     }
-    if let Err(e) = consumer.await? {
-        *stopping.lock().expect("Could not lock \"stopping\"") = true;
-        return Err(e);
-    };
-    if let Err(e) = tui.await? {
-        *stopping.lock().expect("Could not lock \"stopping\"") = true;
-        return Err(e);
-    };
 
     Ok(())
 }
@@ -255,48 +237,32 @@ fn view(
     paths_receiver: &async_channel::Receiver<PathBuf>,
     in_progress: &Arc<Mutex<HashMap<PathBuf, tokio::time::Instant>>>,
     dones: &Arc<Mutex<Vec<Done>>>,
+    duration: Duration,
 ) {
-    let summary_block = widgets::Block::default()
-        .title(" Summary ")
-        .border_style(style::Style::default().fg(style::Color::Blue))
-        .border_type(widgets::BorderType::Rounded)
-        .borders(widgets::Borders::ALL);
+    let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
+        layout::Constraint::Length(6),
+        layout::Constraint::Length(
+            match in_progress
+                .lock()
+                .expect("Could not lock \"in_progress\"")
+                .len() as u16
+            {
+                0 => 0,
+                l => l + 2,
+            },
+        ),
+        layout::Constraint::Fill(1),
+    ])
+    .split(frame.area());
 
-    let summary_table: widgets::Table<'_> = widgets::Table::new(
-        [
-            widgets::Row::new([
-                text::Line::raw("Pending"),
-                text::Line::raw(format!("{}", paths_receiver.len())).right_aligned(),
-            ]),
-            widgets::Row::new([
-                text::Line::raw("In progress"),
-                text::Line::raw(format!(
-                    "{}",
-                    in_progress
-                        .lock()
-                        .expect("Could not lock \"in_progress\"")
-                        .len()
-                ))
-                .right_aligned(),
-            ]),
-        ],
-        [layout::Constraint::Fill(1), layout::Constraint::Length(5)],
+    render_summary(
+        frame,
+        paths_receiver,
+        in_progress,
+        dones,
+        duration,
+        &layout[0],
     );
-
-    let total: usize = dones.lock().expect("Could not lock \"dones\"").len()
-        + in_progress
-            .lock()
-            .expect("Could not lock \"in_progress\"")
-            .len()
-        + paths_receiver.len();
-    let progress: f64 = if total == 0 {
-        0.0
-    } else {
-        dones.lock().expect("Could not lock \"dones\"").len() as f64 / total as f64
-    };
-    let summary_gauge: widgets::Gauge<'_> = widgets::Gauge::default()
-        .ratio(progress)
-        .gauge_style(style::Color::Blue);
 
     let in_progress_table: widgets::Table<'_> = widgets::Table::new(
         in_progress
@@ -369,28 +335,79 @@ fn view(
             .borders(widgets::Borders::ALL),
     );
 
-    let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
-        layout::Constraint::Length(5),
-        layout::Constraint::Length(2 + CONCURRENCY),
-        layout::Constraint::Fill(1),
-    ])
-    .split(frame.area());
+    frame.render_widget(in_progress_table, layout[1]);
+    frame.render_widget(done_table, layout[2]);
+}
+
+fn render_summary(
+    frame: &mut ratatui::Frame<'_>,
+    paths_receiver: &async_channel::Receiver<PathBuf>,
+    in_progress: &Arc<Mutex<HashMap<PathBuf, Instant>>>,
+    dones: &Arc<Mutex<Vec<Done>>>,
+    duration: Duration,
+    area: &ratatui::prelude::Rect,
+) {
+    let total: usize = dones.lock().expect("Could not lock \"dones\"").len()
+        + in_progress
+            .lock()
+            .expect("Could not lock \"in_progress\"")
+            .len()
+        + paths_receiver.len();
+
+    let progress: f64 = if total == 0 {
+        0.0
+    } else {
+        dones.lock().expect("Could not lock \"dones\"").len() as f64 / total as f64
+    };
+
+    let eta: u32 = (duration.as_secs_f64() * (1.0 / progress - 1.0)) as u32;
+
+    let summary_block = widgets::Block::default()
+        .title(" Summary ")
+        .border_style(style::Style::default().fg(style::Color::Blue))
+        .border_type(widgets::BorderType::Rounded)
+        .borders(widgets::Borders::ALL);
+
+    let summary_table: widgets::Table<'_> = widgets::Table::new(
+        [
+            widgets::Row::new([
+                text::Line::raw("Pending"),
+                text::Line::raw(format!("{}", paths_receiver.len())).right_aligned(),
+            ]),
+            widgets::Row::new([
+                text::Line::raw("In progress"),
+                text::Line::raw(format!(
+                    "{}",
+                    in_progress
+                        .lock()
+                        .expect("Could not lock \"in_progress\"")
+                        .len()
+                ))
+                .right_aligned(),
+            ]),
+            widgets::Row::new([
+                text::Line::raw("Expected time until end"),
+                text::Line::raw(format!("{}m {:2}s", eta / 60, eta % 60)).right_aligned(),
+            ]),
+        ],
+        [layout::Constraint::Fill(1), layout::Constraint::Length(10)],
+    );
+
+    let summary_gauge: widgets::Gauge<'_> = widgets::Gauge::default()
+        .ratio(progress)
+        .gauge_style(style::Color::Blue);
 
     let summary_sublayout = layout::Layout::vertical([
-        layout::Constraint::Length(2), // Table
+        layout::Constraint::Length(3), // Table
         layout::Constraint::Length(1), // Gauge
     ])
-    .split(layout[0].inner(layout::Margin {
+    .split(area.inner(layout::Margin {
         horizontal: 1,
         vertical: 1,
     }));
-
-    frame.render_widget(summary_block, layout[0]);
+    frame.render_widget(summary_block, *area);
     frame.render_widget(summary_table, summary_sublayout[0]);
     frame.render_widget(summary_gauge, summary_sublayout[1]);
-
-    frame.render_widget(in_progress_table, layout[1]);
-    frame.render_widget(done_table, layout[2]);
 }
 
 fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
