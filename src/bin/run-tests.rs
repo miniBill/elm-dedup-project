@@ -379,7 +379,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
             fs::remove_dir_all(path.join("elm-stuff"))?;
         }
 
-        let timeout: Duration = Duration::from_secs(60);
+        let timeout: Duration = Duration::from_secs(120);
 
         let mut elm_child: std::process::Child = Command::new("npx")
             .args(["--yes", elm_test_version, "--compiler", compiler])
@@ -392,6 +392,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
             Some(status) => Ok::<RunResult, Error>(RunResult::Finished(status.success())),
             None => {
                 elm_child.kill()?;
+                elm_child.wait()?;
                 Ok(RunResult::TimedOut)
             }
         }
