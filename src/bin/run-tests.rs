@@ -181,46 +181,69 @@ async fn main() -> Result<(), Error> {
         })
     };
 
-    let tui: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-        color_eyre::install()?;
-        let res: Result<(), Error> = (|| {
-            let mut terminal: ratatui::Terminal<_> = ratatui::init();
+    let tui: JoinHandle<Result<(), Error>> = {
+        let stopping = Arc::clone(&stopping);
+        tokio::spawn(async move {
+            color_eyre::install()?;
+            let res: Result<(), Error> = (|| {
+                let mut terminal: ratatui::Terminal<_> = ratatui::init();
 
-            loop {
-                terminal.draw(|frame: &mut ratatui::Frame| {
-                    view(frame, &paths_receiver, &in_progress, &dones);
-                })?;
+                loop {
+                    if *stopping.lock().expect("Could not lock \"stopping\"") {
+                        return Ok(());
+                    }
 
-                if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60)) {
-                    if !available {
-                        continue;
+                    terminal.draw(|frame: &mut ratatui::Frame| {
+                        view(frame, &paths_receiver, &in_progress, &dones);
+                    })?;
+
+                    if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60))
+                    {
+                        if !available {
+                            continue;
+                        }
+                    }
+
+                    match crossterm::event::read()? {
+                        Event::Key(key) => match key.code {
+                            crossterm::event::KeyCode::Char('q') => return Ok(()),
+                            _ => {}
+                        },
+                        Event::FocusGained => {}
+                        Event::FocusLost => {}
+                        Event::Mouse(_mouse_event) => {}
+                        Event::Paste(_) => {}
+                        Event::Resize(_, _) => {}
                     }
                 }
+            })();
 
-                match crossterm::event::read()? {
-                    Event::Key(_) => return Ok(()),
-                    Event::FocusGained => {}
-                    Event::FocusLost => {}
-                    Event::Mouse(_mouse_event) => {}
-                    Event::Paste(_) => {}
-                    Event::Resize(_, _) => {}
-                }
-            }
-        })();
+            *stopping.lock().expect("Could not lock \"stopping\"") = true;
 
+            ratatui::restore();
+
+            res
+        })
+    };
+
+    if let Err(e) = walker.await? {
         *stopping.lock().expect("Could not lock \"stopping\"") = true;
-
-        ratatui::restore();
-
-        res
-    });
-
-    walker.await??;
+        return Err(e);
+    };
     for tester in testers {
-        tester.await??;
+        if let Err(e) = tester.await? {
+            *stopping.lock().expect("Could not lock \"stopping\"") = true;
+            return Err(e);
+        }
     }
-    consumer.await??;
-    tui.await??;
+    if let Err(e) = consumer.await? {
+        *stopping.lock().expect("Could not lock \"stopping\"") = true;
+        return Err(e);
+    };
+    if let Err(e) = tui.await? {
+        *stopping.lock().expect("Could not lock \"stopping\"") = true;
+        return Err(e);
+    };
 
     Ok(())
 }
@@ -350,7 +373,11 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     };
 
     let run_tests_with = |compiler| {
-        fs::remove_dir_all(path.join("elm-stuff"))?;
+        let elm_stuff = path.join("elm-stuff");
+        if elm_stuff.exists() {
+            fs::remove_dir_all(path.join("elm-stuff"))?;
+        }
+
         let timeout = Duration::from_secs(10);
 
         let mut elm_child: std::process::Child = Command::new("npx")
