@@ -1,13 +1,18 @@
-use colored::*;
+use crossterm::event::Event;
+use ratatui::{
+    layout,
+    style::{self, Stylize},
+    text, widgets,
+};
 use std::{
     collections::HashMap,
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
-use tokio::{sync::Mutex, task::JoinHandle, time::Instant};
+use tokio::{task::JoinHandle, time::Instant};
 
 #[derive(Debug)]
 enum Error {
@@ -54,6 +59,7 @@ impl From<&'static str> for Error {
     }
 }
 
+#[derive(Clone)]
 struct Done {
     path: PathBuf,
     time: Duration,
@@ -63,7 +69,7 @@ struct Done {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let concurrency: i32 = 4;
+    let concurrency: u16 = 4;
 
     let (paths_sender, paths_receiver): (
         async_channel::Sender<PathBuf>,
@@ -72,34 +78,36 @@ async fn main() -> Result<(), Error> {
     let (done_sender, done_receiver): (async_channel::Sender<Done>, async_channel::Receiver<Done>) =
         async_channel::unbounded();
     let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-    let mut dones: Vec<Done> = Vec::new();
+    let dones: Arc<Mutex<Vec<Done>>> = Arc::new(Mutex::new(Vec::new()));
 
     let stopping: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
-    let walker_stopping: Arc<Mutex<bool>> = Arc::clone(&stopping);
-    let walker: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-        let paths: Result<(), Error> = (async || {
-            let repos = Path::new("repos");
-            for author_root in read_dir(&repos)? {
-                for package_root in read_dir(author_root)? {
-                    for version_root in read_dir(package_root)? {
-                        if *walker_stopping.lock().await {
-                            return Ok(());
-                        }
-                        let tests: PathBuf = version_root.join("tests");
-                        let elm_json: PathBuf = version_root.join("elm.json");
-                        if tests.exists() && elm_json.exists() {
-                            paths_sender.send(version_root).await?;
+    let walker: JoinHandle<Result<(), Error>> = {
+        let stopping: Arc<Mutex<bool>> = Arc::clone(&stopping);
+        tokio::spawn(async move {
+            let paths: Result<(), Error> = (async || {
+                let repos = Path::new("repos");
+                for author_root in read_dir(&repos)? {
+                    for package_root in read_dir(author_root)? {
+                        for version_root in read_dir(package_root)? {
+                            if *stopping.lock().expect("Could not lock \"stopping\"") {
+                                return Ok(());
+                            }
+                            let tests: PathBuf = version_root.join("tests");
+                            let elm_json: PathBuf = version_root.join("elm.json");
+                            if tests.exists() && elm_json.exists() {
+                                paths_sender.send(version_root).await?;
+                            }
                         }
                     }
                 }
-            }
-            Ok(())
-        })()
-        .await;
-        paths_sender.close();
-        paths
-    });
+                Ok(())
+            })()
+            .await;
+            paths_sender.close();
+            paths
+        })
+    };
 
     let mut testers: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
     for _i in 0..concurrency {
@@ -109,7 +117,7 @@ async fn main() -> Result<(), Error> {
         let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = in_progress.clone();
         let tester: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
             loop {
-                if *stopping.lock().await {
+                if *stopping.lock().expect("Could not lock \"stopping\"") {
                     return Ok(());
                 }
 
@@ -119,11 +127,17 @@ async fn main() -> Result<(), Error> {
                 };
 
                 let start: Instant = Instant::now();
-                in_progress.lock().await.insert(version_root.clone(), start);
+                in_progress
+                    .lock()
+                    .expect("Could not lock \"in_progress\"")
+                    .insert(version_root.clone(), start);
 
                 let res: Result<(bool, bool), Error> = check_tests_for(&version_root);
 
-                in_progress.lock().await.remove(&version_root);
+                in_progress
+                    .lock()
+                    .expect("Could not lock \"in_progress\"")
+                    .remove(&version_root);
 
                 let (elm_result, lamdera_result) = res?;
 
@@ -141,39 +155,164 @@ async fn main() -> Result<(), Error> {
         testers.push(tester);
     }
 
-    let consumer_stopping = Arc::clone(&stopping);
-    let consumer: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-        loop {
-            if *consumer_stopping.lock().await {
-                return Ok(());
+    let consumer: JoinHandle<Result<(), Error>> = {
+        let stopping = Arc::clone(&stopping);
+        let dones = Arc::clone(&dones);
+        tokio::spawn(async move {
+            loop {
+                if *stopping.lock().expect("Could not lock \"stopping\"") {
+                    return Ok(());
+                }
+
+                let done = match done_receiver.recv_blocking() {
+                    Ok(done) => done,
+                    Err(async_channel::RecvError) => return Ok(()),
+                };
+
+                dones.lock().expect("Could not lock \"dones\"").push(done);
             }
-
-            let done = match done_receiver.recv_blocking() {
-                Ok(done) => done,
-                Err(async_channel::RecvError) => return Ok(()),
-            };
-
-            dones.push(done);
-        }
-    });
+        })
+    };
 
     let tui: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
         color_eyre::install()?;
-        let res: Result<(), Error> = (|| loop {
+        let res: Result<(), Error> = (|| {
             let mut terminal: ratatui::Terminal<_> = ratatui::init();
 
-            terminal.draw(|_frame: &mut ratatui::Frame| {})?;
-            match ratatui::crossterm::event::read()? {
-                ratatui::crossterm::event::Event::Key(_) => return Ok(()),
-                ratatui::crossterm::event::Event::FocusGained => {}
-                ratatui::crossterm::event::Event::FocusLost => {}
-                ratatui::crossterm::event::Event::Mouse(_mouse_event) => {}
-                ratatui::crossterm::event::Event::Paste(_) => {}
-                ratatui::crossterm::event::Event::Resize(_, _) => {}
+            loop {
+                terminal.draw(|frame: &mut ratatui::Frame| {
+                    let summary_table: widgets::Table<'_> = widgets::Table::new(
+                        vec![
+                            widgets::Row::new(vec![
+                                "Pending".into(),
+                                format!("{}", paths_receiver.len()),
+                            ]),
+                            widgets::Row::new(vec![
+                                "In progress".into(),
+                                format!(
+                                    "{}",
+                                    in_progress
+                                        .lock()
+                                        .expect("Could not lock \"in_progress\"")
+                                        .len()
+                                ),
+                            ]),
+                        ],
+                        vec![layout::Constraint::Fill(1), layout::Constraint::Length(5)],
+                    )
+                    .block(
+                        widgets::Block::default()
+                            .title(" Summary ")
+                            .border_style(style::Style::default().fg(style::Color::Blue))
+                            .border_type(widgets::BorderType::Rounded)
+                            .borders(widgets::Borders::ALL),
+                    );
+
+                    let in_progress_table: widgets::Table<'_> = widgets::Table::new(
+                        in_progress
+                            .lock()
+                            .expect("Could not lock \"in_progress\"")
+                            .iter()
+                            .map(|(path, instant)| {
+                                widgets::Row::new(vec![
+                                    format!("{}", path.display()),
+                                    format!("{:>9}s", instant.elapsed().as_secs()),
+                                ])
+                            })
+                            .collect::<Vec<_>>(),
+                        [layout::Constraint::Fill(1), layout::Constraint::Length(10)],
+                    )
+                    .block(
+                        widgets::Block::default()
+                            .title(" In progress ")
+                            .border_style(style::Style::default().fg(style::Color::Blue))
+                            .border_type(widgets::BorderType::Rounded)
+                            .borders(widgets::Borders::ALL),
+                    );
+
+                    let mut done_list: Vec<Done> = dones
+                        .lock()
+                        .expect("Could not lock \"dones\"")
+                        .iter()
+                        .map(|done| done.clone())
+                        .collect::<Vec<_>>();
+                    done_list.reverse();
+                    done_list.sort_by_key(|done| {
+                        if done.elm_result != done.lamdera_result {
+                            0
+                        } else {
+                            1
+                        }
+                    });
+                    let done_table: widgets::Table<'_> = widgets::Table::new(
+                        done_list
+                            .into_iter()
+                            .map(|done| {
+                                widgets::Row::new(vec![
+                                    text::Line::raw(format!("{}", done.path.display())),
+                                    if done.elm_result {
+                                        text::Line::raw("✅").centered()
+                                    } else {
+                                        text::Line::raw("❌").centered()
+                                    },
+                                    if done.lamdera_result {
+                                        text::Line::raw("✅").centered()
+                                    } else {
+                                        text::Line::raw("❌").centered()
+                                    },
+                                    text::Line::raw(format!("{}s", done.time.as_secs()))
+                                        .right_aligned(),
+                                ])
+                            })
+                            .collect::<Vec<_>>(),
+                        [
+                            layout::Constraint::Fill(1),
+                            layout::Constraint::Length(7),
+                            layout::Constraint::Length(7),
+                            layout::Constraint::Length(10),
+                        ],
+                    )
+                    .header(
+                        widgets::Row::new(["Package", "  Elm  ", "Lamdera", "   Time   "]).yellow(),
+                    )
+                    .block(
+                        widgets::Block::default()
+                            .title(" Done ")
+                            .border_style(style::Style::default().fg(style::Color::Blue))
+                            .border_type(widgets::BorderType::Rounded)
+                            .borders(widgets::Borders::ALL),
+                    );
+
+                    let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
+                        layout::Constraint::Length(3),
+                        layout::Constraint::Length(2 + concurrency),
+                        layout::Constraint::Fill(1),
+                    ])
+                    .split(frame.area());
+
+                    frame.render_widget(summary_table, layout[0]);
+                    frame.render_widget(in_progress_table, layout[1]);
+                    frame.render_widget(done_table, layout[2]);
+                })?;
+
+                if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60)) {
+                    if !available {
+                        continue;
+                    }
+                }
+
+                match crossterm::event::read()? {
+                    Event::Key(_) => return Ok(()),
+                    Event::FocusGained => {}
+                    Event::FocusLost => {}
+                    Event::Mouse(_mouse_event) => {}
+                    Event::Paste(_) => {}
+                    Event::Resize(_, _) => {}
+                }
             }
         })();
 
-        *stopping.lock().await = true;
+        *stopping.lock().expect("Could not lock \"stopping\"") = true;
 
         ratatui::restore();
 
@@ -191,8 +330,6 @@ async fn main() -> Result<(), Error> {
 }
 
 fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
-    println!("{}", path.display());
-
     let elm_json = path.join("elm.json");
 
     let elm_json_content = fs::read_to_string(elm_json)?;
@@ -220,23 +357,6 @@ fn check_tests_for(path: &PathBuf) -> Result<(bool, bool), Error> {
         .spawn()?
         .wait()?
         .success();
-
-    if lamdera_result != elm_result {
-        // Re-run the tests to show the output
-        let _ = Command::new("npx")
-            .args(["--yes", elm_test_version, "--compiler", "lamdera"])
-            .current_dir(&path)
-            .spawn()?
-            .wait()?
-            .success();
-
-        println!(
-            "{} {}",
-            "!!! Difference in test results between elm and lamdera in".red(),
-            format!("{}", path.display()).blue()
-        );
-        return Err("There is a compiler bug!".into());
-    }
 
     return Ok((elm_result, lamdera_result));
 }
