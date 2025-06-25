@@ -74,10 +74,10 @@ enum RunResult {
     TimedOut,
 }
 
+const CONCURRENCY: u16 = 4;
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let concurrency: u16 = 4;
-
     let (paths_sender, paths_receiver): (
         async_channel::Sender<PathBuf>,
         async_channel::Receiver<PathBuf>,
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Error> {
     };
 
     let mut testers: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
-    for _i in 0..concurrency {
+    for _i in 0..CONCURRENCY {
         let stopping: Arc<Mutex<bool>> = Arc::clone(&stopping);
         let paths_receiver: async_channel::Receiver<PathBuf> = paths_receiver.clone();
         let done_sender: async_channel::Sender<Done> = done_sender.clone();
@@ -188,117 +188,7 @@ async fn main() -> Result<(), Error> {
 
             loop {
                 terminal.draw(|frame: &mut ratatui::Frame| {
-                    let summary_table: widgets::Table<'_> = widgets::Table::new(
-                        vec![
-                            widgets::Row::new(vec![
-                                "Pending".into(),
-                                format!("{}", paths_receiver.len()),
-                            ]),
-                            widgets::Row::new(vec![
-                                "In progress".into(),
-                                format!(
-                                    "{}",
-                                    in_progress
-                                        .lock()
-                                        .expect("Could not lock \"in_progress\"")
-                                        .len()
-                                ),
-                            ]),
-                        ],
-                        vec![layout::Constraint::Fill(1), layout::Constraint::Length(5)],
-                    )
-                    .block(
-                        widgets::Block::default()
-                            .title(" Summary ")
-                            .border_style(style::Style::default().fg(style::Color::Blue))
-                            .border_type(widgets::BorderType::Rounded)
-                            .borders(widgets::Borders::ALL),
-                    );
-
-                    let in_progress_table: widgets::Table<'_> = widgets::Table::new(
-                        in_progress
-                            .lock()
-                            .expect("Could not lock \"in_progress\"")
-                            .iter()
-                            .map(|(path, instant)| {
-                                widgets::Row::new(vec![
-                                    format!("{}", path.display()),
-                                    format!("{:>9}s", instant.elapsed().as_secs()),
-                                ])
-                            })
-                            .collect::<Vec<_>>(),
-                        [layout::Constraint::Fill(1), layout::Constraint::Length(10)],
-                    )
-                    .block(
-                        widgets::Block::default()
-                            .title(" In progress ")
-                            .border_style(style::Style::default().fg(style::Color::Blue))
-                            .border_type(widgets::BorderType::Rounded)
-                            .borders(widgets::Borders::ALL),
-                    );
-
-                    let mut done_list: Vec<Done> = dones
-                        .lock()
-                        .expect("Could not lock \"dones\"")
-                        .iter()
-                        .map(|done| done.clone())
-                        .collect::<Vec<_>>();
-                    done_list.reverse();
-                    done_list.sort_by_key(|done| {
-                        if done.elm_result != done.lamdera_result {
-                            0
-                        } else {
-                            1
-                        }
-                    });
-                    fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
-                        match result {
-                            RunResult::Finished(true) => text::Line::raw("✅").centered(),
-                            RunResult::Finished(false) => text::Line::raw("❌").centered(),
-                            RunResult::TimedOut => text::Line::raw("⏰").centered(),
-                        }
-                    }
-                    let done_table: widgets::Table<'_> = widgets::Table::new(
-                        done_list
-                            .into_iter()
-                            .map(|done| {
-                                widgets::Row::new(vec![
-                                    text::Line::raw(format!("{}", done.path.display())),
-                                    view_done_result(done.elm_result),
-                                    view_done_result(done.lamdera_result),
-                                    text::Line::raw(format!("{}s", done.time.as_secs()))
-                                        .right_aligned(),
-                                ])
-                            })
-                            .collect::<Vec<_>>(),
-                        [
-                            layout::Constraint::Fill(1),
-                            layout::Constraint::Length(7),
-                            layout::Constraint::Length(7),
-                            layout::Constraint::Length(10),
-                        ],
-                    )
-                    .header(
-                        widgets::Row::new(["Package", "  Elm  ", "Lamdera", "   Time   "]).yellow(),
-                    )
-                    .block(
-                        widgets::Block::default()
-                            .title(" Done ")
-                            .border_style(style::Style::default().fg(style::Color::Blue))
-                            .border_type(widgets::BorderType::Rounded)
-                            .borders(widgets::Borders::ALL),
-                    );
-
-                    let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
-                        layout::Constraint::Length(3),
-                        layout::Constraint::Length(2 + concurrency),
-                        layout::Constraint::Fill(1),
-                    ])
-                    .split(frame.area());
-
-                    frame.render_widget(summary_table, layout[0]);
-                    frame.render_widget(in_progress_table, layout[1]);
-                    frame.render_widget(done_table, layout[2]);
+                    view(frame, &paths_receiver, &in_progress, &dones);
                 })?;
 
                 if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60)) {
@@ -333,6 +223,119 @@ async fn main() -> Result<(), Error> {
     tui.await??;
 
     Ok(())
+}
+
+fn view(
+    frame: &mut ratatui::Frame,
+    paths_receiver: &async_channel::Receiver<PathBuf>,
+    in_progress: &Arc<Mutex<HashMap<PathBuf, tokio::time::Instant>>>,
+    dones: &Arc<Mutex<Vec<Done>>>,
+) {
+    let summary_table: widgets::Table<'_> = widgets::Table::new(
+        vec![
+            widgets::Row::new(vec!["Pending".into(), format!("{}", paths_receiver.len())]),
+            widgets::Row::new(vec![
+                "In progress".into(),
+                format!(
+                    "{}",
+                    in_progress
+                        .lock()
+                        .expect("Could not lock \"in_progress\"")
+                        .len()
+                ),
+            ]),
+        ],
+        vec![layout::Constraint::Fill(1), layout::Constraint::Length(5)],
+    )
+    .block(
+        widgets::Block::default()
+            .title(" Summary ")
+            .border_style(style::Style::default().fg(style::Color::Blue))
+            .border_type(widgets::BorderType::Rounded)
+            .borders(widgets::Borders::ALL),
+    );
+
+    let in_progress_table: widgets::Table<'_> = widgets::Table::new(
+        in_progress
+            .lock()
+            .expect("Could not lock \"in_progress\"")
+            .iter()
+            .map(|(path, instant)| {
+                widgets::Row::new(vec![
+                    format!("{}", path.display()),
+                    format!("{:>9}s", instant.elapsed().as_secs()),
+                ])
+            })
+            .collect::<Vec<_>>(),
+        [layout::Constraint::Fill(1), layout::Constraint::Length(10)],
+    )
+    .block(
+        widgets::Block::default()
+            .title(" In progress ")
+            .border_style(style::Style::default().fg(style::Color::Blue))
+            .border_type(widgets::BorderType::Rounded)
+            .borders(widgets::Borders::ALL),
+    );
+
+    let mut done_list: Vec<Done> = dones
+        .lock()
+        .expect("Could not lock \"dones\"")
+        .iter()
+        .map(|done| done.clone())
+        .collect::<Vec<_>>();
+    done_list.reverse();
+    done_list.sort_by_key(|done| {
+        if done.elm_result != done.lamdera_result {
+            0
+        } else {
+            1
+        }
+    });
+    fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
+        match result {
+            RunResult::Finished(true) => text::Line::raw("✅").centered(),
+            RunResult::Finished(false) => text::Line::raw("❌").centered(),
+            RunResult::TimedOut => text::Line::raw("⏰").centered(),
+        }
+    }
+    let done_table: widgets::Table<'_> = widgets::Table::new(
+        done_list
+            .into_iter()
+            .map(|done| {
+                widgets::Row::new(vec![
+                    text::Line::raw(format!("{}", done.path.display())),
+                    view_done_result(done.elm_result),
+                    view_done_result(done.lamdera_result),
+                    text::Line::raw(format!("{}s", done.time.as_secs())).right_aligned(),
+                ])
+            })
+            .collect::<Vec<_>>(),
+        [
+            layout::Constraint::Fill(1),
+            layout::Constraint::Length(7),
+            layout::Constraint::Length(7),
+            layout::Constraint::Length(10),
+        ],
+    )
+    .header(widgets::Row::new(["Package", "  Elm  ", "Lamdera", "   Time   "]).yellow())
+    .block(
+        widgets::Block::default()
+            .title(" Done ")
+            .border_style(style::Style::default().fg(style::Color::Blue))
+            .border_type(widgets::BorderType::Rounded)
+            .borders(widgets::Borders::ALL),
+    );
+
+    let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
+        layout::Constraint::Length(3),
+        layout::Constraint::Length(2 + CONCURRENCY),
+        layout::Constraint::Fill(1),
+    ])
+    .split(frame.area());
+
+    frame.render_widget(summary_table, layout[0]);
+    frame.render_widget(in_progress_table, layout[1]);
+    frame.render_widget(done_table, layout[2]);
 }
 
 fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
