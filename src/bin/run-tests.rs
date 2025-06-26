@@ -1,3 +1,5 @@
+#![feature(mpmc_channel)]
+
 use crossterm::event::Event;
 use ratatui::{
     layout,
@@ -9,17 +11,16 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
-    time::Duration,
+    sync::{mpmc, Arc, Mutex},
+    thread::{self, ScopedJoinHandle},
+    time::{Duration, Instant},
 };
-use tokio::{task::JoinHandle, time::Instant};
 use wait_timeout::ChildExt;
 
 #[derive(Debug)]
 enum Error {
     IO(io::Error),
-    SendPath(async_channel::SendError<PathBuf>),
-    Join(tokio::task::JoinError),
+    SendPath(mpmc::SendError<PathBuf>),
     ColorEyre(color_eyre::Report),
     Other(String),
 }
@@ -30,15 +31,9 @@ impl From<io::Error> for Error {
     }
 }
 
-impl From<async_channel::SendError<PathBuf>> for Error {
-    fn from(e: async_channel::SendError<PathBuf>) -> Self {
+impl From<mpmc::SendError<PathBuf>> for Error {
+    fn from(e: mpmc::SendError<PathBuf>) -> Self {
         Error::SendPath(e)
-    }
-}
-
-impl From<tokio::task::JoinError> for Error {
-    fn from(e: tokio::task::JoinError) -> Self {
-        Error::Join(e)
     }
 }
 
@@ -76,59 +71,38 @@ enum RunResult {
 
 const CONCURRENCY: u16 = 10;
 
-#[tokio::main]
-async fn main() -> Result<(), Error> {
-    let (paths_sender, paths_receiver): (
-        async_channel::Sender<PathBuf>,
-        async_channel::Receiver<PathBuf>,
-    ) = async_channel::unbounded();
+fn main() -> Result<(), Error> {
+    let (paths_sender, paths_receiver): (mpmc::Sender<PathBuf>, mpmc::Receiver<PathBuf>) =
+        mpmc::channel();
     let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
     let dones: Arc<Mutex<Vec<Done>>> = Arc::new(Mutex::new(Vec::new()));
 
     let stopping: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
 
-    let walker: JoinHandle<Result<(), Error>> = {
-        let stopping: Arc<Mutex<bool>> = stopping.clone();
-        tokio::spawn(async move {
-            let paths: Result<(), Error> = (async || {
-                let repos = Path::new("repos");
-                for author_root in read_dir(&repos)? {
-                    for package_root in read_dir(author_root)? {
-                        for version_root in read_dir(package_root)? {
-                            if *stopping.lock().expect("Could not lock \"stopping\"") {
-                                return Ok(());
-                            }
-                            let tests: PathBuf = version_root.join("tests");
-                            let elm_json: PathBuf = version_root.join("elm.json");
-                            if tests.exists() && elm_json.exists() {
-                                paths_sender.send(version_root).await?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })()
-            .await;
-            paths_sender.close();
-            paths
-        })
-    };
+    thread::scope::<_, Result<(), Error>>(|scope| {
+        let walker: ScopedJoinHandle<Result<(), Error>> = {
+            let stopping: Arc<Mutex<bool>> = stopping.clone();
+            scope.spawn(move || {
+                let paths: Result<(), Error> = walk_path(&stopping, &paths_sender);
+                drop(paths_sender);
+                paths
+            })
+        };
 
-    let mut testers: Vec<JoinHandle<Result<(), Error>>> = Vec::new();
-    for _i in 0..CONCURRENCY {
-        let stopping: Arc<Mutex<bool>> = stopping.clone();
-        let paths_receiver: async_channel::Receiver<PathBuf> = paths_receiver.clone();
-        let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = in_progress.clone();
-        let dones: Arc<Mutex<Vec<Done>>> = dones.clone();
-        let tester: JoinHandle<Result<(), Error>> = tokio::spawn(async move {
-            loop {
+        let mut testers: Vec<ScopedJoinHandle<Result<(), Error>>> = Vec::new();
+        for _i in 0..CONCURRENCY {
+            let stopping: Arc<Mutex<bool>> = stopping.clone();
+            let paths_receiver: mpmc::Receiver<PathBuf> = paths_receiver.clone();
+            let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = in_progress.clone();
+            let dones: Arc<Mutex<Vec<Done>>> = dones.clone();
+            let tester: ScopedJoinHandle<Result<(), Error>> = scope.spawn(move || loop {
                 if *stopping.lock().expect("Could not lock \"stopping\"") {
                     return Ok(());
                 }
 
-                let version_root: PathBuf = match paths_receiver.recv_blocking() {
+                let version_root: PathBuf = match paths_receiver.recv() {
                     Ok(version_root) => version_root,
-                    Err(async_channel::RecvError) => return Ok(()),
+                    Err(mpmc::RecvError) => return Ok(()),
                 };
 
                 let start: Instant = Instant::now();
@@ -152,91 +126,107 @@ async fn main() -> Result<(), Error> {
                     elm_result,
                     lamdera_result,
                 });
-            }
-        });
-        testers.push(tester);
-    }
+            });
+            testers.push(tester);
+        }
 
-    let tui: JoinHandle<Result<(), Error>> = {
-        let stopping: Arc<Mutex<bool>> = stopping.clone();
-        tokio::spawn(async move {
-            color_eyre::install()?;
-            let res: Result<(), Error> = (|| {
-                let mut terminal: ratatui::Terminal<_> = ratatui::init();
+        let tui: ScopedJoinHandle<Result<(), Error>> = {
+            let stopping: Arc<Mutex<bool>> = stopping.clone();
+            scope.spawn(move || {
+                color_eyre::install()?;
+                let res: Result<(), Error> =
+                    ui_thread(&stopping, &paths_receiver, &in_progress, &dones);
 
-                let start: Instant = Instant::now();
+                ratatui::restore();
 
-                loop {
-                    if *stopping.lock().expect("Could not lock \"stopping\"") {
-                        return Ok(());
-                    }
+                res
+            })
+        };
 
-                    terminal.draw(|frame: &mut ratatui::Frame| {
-                        view(
-                            frame,
-                            &paths_receiver,
-                            &in_progress,
-                            &dones,
-                            start.elapsed(),
-                        );
-                    })?;
+        let res: Result<Result<(), Error>, _> = tui.join();
 
-                    if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60))
-                    {
-                        if !available {
-                            continue;
-                        }
-                    }
+        *stopping.lock().expect("Could not lock \"stopping\"") = true;
 
-                    match crossterm::event::read()? {
-                        Event::Key(key) => match key.code {
-                            crossterm::event::KeyCode::Char('q') => return Ok(()),
-                            _ => {}
-                        },
-                        Event::FocusGained => {}
-                        Event::FocusLost => {}
-                        Event::Mouse(_mouse_event) => {}
-                        Event::Paste(_) => {}
-                        Event::Resize(_, _) => {}
-                    }
+        // We can unwrap here because an Err means that the thread panic!ed
+        res.unwrap()?;
+
+        println!("Waiting for directory walker to exit.");
+        // We can unwrap here because an Err means that the thread panic!ed
+        walker.join().unwrap()?;
+
+        println!("Waiting for testers to exit.");
+        for tester in testers {
+            // We can unwrap here because an Err means that the thread panic!ed
+            tester.join().unwrap()?;
+        }
+
+        Ok(())
+    })
+}
+
+fn walk_path(stopping: &Mutex<bool>, paths_sender: &mpmc::Sender<PathBuf>) -> Result<(), Error> {
+    let repos = Path::new("repos");
+    for author_root in read_dir(&repos)? {
+        for package_root in read_dir(author_root)? {
+            for version_root in read_dir(package_root)? {
+                if *stopping.lock().expect("Could not lock \"stopping\"") {
+                    return Ok(());
                 }
-            })();
-
-            *stopping.lock().expect("Could not lock \"stopping\"") = true;
-
-            ratatui::restore();
-
-            res
-        })
-    };
-
-    if let Err(e) = tui.await? {
-        *stopping.lock().expect("Could not lock \"stopping\"") = true;
-        return Err(e);
-    };
-
-    println!("Waiting for directory walker to exit.");
-    if let Err(e) = walker.await? {
-        *stopping.lock().expect("Could not lock \"stopping\"") = true;
-        return Err(e);
-    };
-
-    println!("Waiting for testers to exit.");
-    for tester in testers {
-        if let Err(e) = tester.await? {
-            *stopping.lock().expect("Could not lock \"stopping\"") = true;
-            return Err(e);
+                let tests: PathBuf = version_root.join("tests");
+                let elm_json: PathBuf = version_root.join("elm.json");
+                if tests.exists() && elm_json.exists() {
+                    paths_sender.send(version_root)?;
+                }
+            }
         }
     }
-
     Ok(())
+}
+
+fn ui_thread(
+    stopping: &Mutex<bool>,
+    paths_receiver: &mpmc::Receiver<PathBuf>,
+    in_progress: &Mutex<HashMap<PathBuf, Instant>>,
+    dones: &Mutex<Vec<Done>>,
+) -> Result<(), Error> {
+    let mut terminal: ratatui::Terminal<_> = ratatui::init();
+
+    let start: Instant = Instant::now();
+
+    loop {
+        if *stopping.lock().expect("Could not lock \"stopping\"") {
+            return Ok(());
+        }
+
+        terminal.draw(|frame: &mut ratatui::Frame| {
+            view(frame, paths_receiver, in_progress, dones, start.elapsed());
+        })?;
+
+        if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60)) {
+            if !available {
+                continue;
+            }
+        }
+
+        match crossterm::event::read()? {
+            Event::Key(key) => match key.code {
+                crossterm::event::KeyCode::Char('q') => return Ok(()),
+                _ => {}
+            },
+            Event::FocusGained => {}
+            Event::FocusLost => {}
+            Event::Mouse(_mouse_event) => {}
+            Event::Paste(_) => {}
+            Event::Resize(_, _) => {}
+        }
+    }
 }
 
 fn view(
     frame: &mut ratatui::Frame,
-    paths_receiver: &async_channel::Receiver<PathBuf>,
-    in_progress: &Arc<Mutex<HashMap<PathBuf, tokio::time::Instant>>>,
-    dones: &Arc<Mutex<Vec<Done>>>,
+    paths_receiver: &mpmc::Receiver<PathBuf>,
+    in_progress: &Mutex<HashMap<PathBuf, Instant>>,
+    dones: &Mutex<Vec<Done>>,
     duration: Duration,
 ) {
     let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
@@ -341,9 +331,9 @@ fn view(
 
 fn render_summary(
     frame: &mut ratatui::Frame<'_>,
-    paths_receiver: &async_channel::Receiver<PathBuf>,
-    in_progress: &Arc<Mutex<HashMap<PathBuf, Instant>>>,
-    dones: &Arc<Mutex<Vec<Done>>>,
+    paths_receiver: &mpmc::Receiver<PathBuf>,
+    in_progress: &Mutex<HashMap<PathBuf, Instant>>,
+    dones: &Mutex<Vec<Done>>,
     duration: Duration,
     area: &ratatui::prelude::Rect,
 ) {
