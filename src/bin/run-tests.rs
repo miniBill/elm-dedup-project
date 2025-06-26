@@ -70,6 +70,7 @@ enum RunResult {
 }
 
 const CONCURRENCY: u16 = 10;
+const FPS: u64 = 20;
 
 fn main() -> Result<(), Error> {
     let (paths_sender, paths_receiver): (mpmc::Sender<PathBuf>, mpmc::Receiver<PathBuf>) =
@@ -191,7 +192,7 @@ fn ui_thread(
             view(frame, paths_receiver, in_progress, dones, start.elapsed());
         })?;
 
-        if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / 60)) {
+        if let Ok(available) = crossterm::event::poll(Duration::from_millis(1000 / FPS)) {
             if !available {
                 continue;
             }
