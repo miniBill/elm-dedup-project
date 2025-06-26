@@ -218,18 +218,16 @@ fn view(
     dones: &Mutex<Vec<Done>>,
     duration: Duration,
 ) {
+    let in_progress: std::sync::MutexGuard<'_, HashMap<PathBuf, Instant>> =
+        in_progress.lock().expect("Could not lock \"in_progress\"");
+    let dones: std::sync::MutexGuard<'_, Vec<Done>> =
+        dones.lock().expect("Could not lock \"dones\"");
     let layout: std::rc::Rc<[ratatui::prelude::Rect]> = layout::Layout::vertical([
         layout::Constraint::Length(6),
-        layout::Constraint::Length(
-            match in_progress
-                .lock()
-                .expect("Could not lock \"in_progress\"")
-                .len() as u16
-            {
-                0 => 0,
-                l => l + 2,
-            },
-        ),
+        layout::Constraint::Length(match in_progress.len() as u16 {
+            0 => 0,
+            l => l + 2,
+        }),
         layout::Constraint::Fill(1),
     ])
     .split(frame.area());
@@ -237,16 +235,14 @@ fn view(
     render_summary(
         frame,
         paths_receiver,
-        in_progress,
-        dones,
+        &*in_progress,
+        &*dones,
         duration,
         &layout[0],
     );
 
     let in_progress_table: widgets::Table<'_> = widgets::Table::new(
         in_progress
-            .lock()
-            .expect("Could not lock \"in_progress\"")
             .iter()
             .map(|(path, instant)| {
                 widgets::Row::new([
@@ -265,12 +261,7 @@ fn view(
             .borders(widgets::Borders::ALL),
     );
 
-    let mut done_list: Vec<Done> = dones
-        .lock()
-        .expect("Could not lock \"dones\"")
-        .iter()
-        .map(|done| done.clone())
-        .collect::<Vec<_>>();
+    let mut done_list: Vec<Done> = dones.iter().map(|done| done.clone()).collect::<Vec<_>>();
     done_list.reverse();
     done_list.sort_by_key(|done| {
         if done.elm_result != done.lamdera_result {
@@ -321,22 +312,17 @@ fn view(
 fn render_summary(
     frame: &mut ratatui::Frame<'_>,
     paths_receiver: &mpmc::Receiver<PathBuf>,
-    in_progress: &Mutex<HashMap<PathBuf, Instant>>,
-    dones: &Mutex<Vec<Done>>,
+    in_progress: &HashMap<PathBuf, Instant>,
+    dones: &Vec<Done>,
     duration: Duration,
     area: &ratatui::prelude::Rect,
 ) {
-    let total: usize = dones.lock().expect("Could not lock \"dones\"").len()
-        + in_progress
-            .lock()
-            .expect("Could not lock \"in_progress\"")
-            .len()
-        + paths_receiver.len();
+    let total: usize = dones.len() + in_progress.len() + paths_receiver.len();
 
     let progress: f64 = if total == 0 {
         0.0
     } else {
-        dones.lock().expect("Could not lock \"dones\"").len() as f64 / total as f64
+        dones.len() as f64 / total as f64
     };
 
     let eta: u32 = (duration.as_secs_f64() * (1.0 / progress - 1.0)) as u32;
@@ -355,14 +341,7 @@ fn render_summary(
             ]),
             widgets::Row::new([
                 text::Line::raw("In progress"),
-                text::Line::raw(format!(
-                    "{}",
-                    in_progress
-                        .lock()
-                        .expect("Could not lock \"in_progress\"")
-                        .len()
-                ))
-                .right_aligned(),
+                text::Line::raw(format!("{}", in_progress.len())).right_aligned(),
             ]),
             widgets::Row::new([
                 text::Line::raw("Expected time until end"),
