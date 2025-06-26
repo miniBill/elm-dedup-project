@@ -11,7 +11,7 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{mpmc, Arc, Mutex},
+    sync::{mpmc, Mutex},
     thread::{self, ScopedJoinHandle},
     time::{Duration, Instant},
 };
@@ -74,28 +74,20 @@ const CONCURRENCY: u16 = 10;
 fn main() -> Result<(), Error> {
     let (paths_sender, paths_receiver): (mpmc::Sender<PathBuf>, mpmc::Receiver<PathBuf>) =
         mpmc::channel();
-    let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = Arc::new(Mutex::new(HashMap::new()));
-    let dones: Arc<Mutex<Vec<Done>>> = Arc::new(Mutex::new(Vec::new()));
-
-    let stopping: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
+    let in_progress: Mutex<HashMap<PathBuf, Instant>> = Mutex::new(HashMap::new());
+    let dones: Mutex<Vec<Done>> = Mutex::new(Vec::new());
+    let stopping: Mutex<bool> = Mutex::new(false);
 
     thread::scope::<_, Result<(), Error>>(|scope| {
-        let walker: ScopedJoinHandle<Result<(), Error>> = {
-            let stopping: Arc<Mutex<bool>> = stopping.clone();
-            scope.spawn(move || {
-                let paths: Result<(), Error> = walk_path(&stopping, &paths_sender);
-                drop(paths_sender);
-                paths
-            })
-        };
+        let walker: ScopedJoinHandle<Result<(), Error>> = scope.spawn(|| {
+            let paths: Result<(), Error> = walk_path(&stopping, &paths_sender);
+            drop(paths_sender);
+            paths
+        });
 
         let mut testers: Vec<ScopedJoinHandle<Result<(), Error>>> = Vec::new();
         for _i in 0..CONCURRENCY {
-            let stopping: Arc<Mutex<bool>> = stopping.clone();
-            let paths_receiver: mpmc::Receiver<PathBuf> = paths_receiver.clone();
-            let in_progress: Arc<Mutex<HashMap<PathBuf, Instant>>> = in_progress.clone();
-            let dones: Arc<Mutex<Vec<Done>>> = dones.clone();
-            let tester: ScopedJoinHandle<Result<(), Error>> = scope.spawn(move || loop {
+            let tester: ScopedJoinHandle<Result<(), Error>> = scope.spawn(|| loop {
                 if *stopping.lock().expect("Could not lock \"stopping\"") {
                     return Ok(());
                 }
@@ -130,18 +122,15 @@ fn main() -> Result<(), Error> {
             testers.push(tester);
         }
 
-        let tui: ScopedJoinHandle<Result<(), Error>> = {
-            let stopping: Arc<Mutex<bool>> = stopping.clone();
-            scope.spawn(move || {
-                color_eyre::install()?;
-                let res: Result<(), Error> =
-                    ui_thread(&stopping, &paths_receiver, &in_progress, &dones);
+        let tui: ScopedJoinHandle<Result<(), Error>> = scope.spawn(|| {
+            color_eyre::install()?;
+            let res: Result<(), Error> =
+                ui_thread(&stopping, &paths_receiver, &in_progress, &dones);
 
-                ratatui::restore();
+            ratatui::restore();
 
-                res
-            })
-        };
+            res
+        });
 
         let res: Result<Result<(), Error>, _> = tui.join();
 
