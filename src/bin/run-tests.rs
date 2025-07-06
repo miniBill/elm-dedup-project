@@ -422,7 +422,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     };
 
     let elm_result: RunResult = run_tests_with("elm")?;
-    let lamdera_result: RunResult = run_tests_with("lamdera-stable")?;
+    let lamdera_result: RunResult = run_tests_with("lamdera-next-no-wire")?;
 
     return Ok((elm_result, lamdera_result));
 }
