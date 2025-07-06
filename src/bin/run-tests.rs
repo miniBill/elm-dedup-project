@@ -373,13 +373,13 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     let elm_json: PathBuf = path.join("elm.json");
 
     let elm_json_content: String = fs::read_to_string(elm_json)?;
+    let requires_elm_test_1: bool = elm_json_content.contains("\"elm-explorations/test\": \"1");
 
-    let elm_test_version: &'static str =
-        if elm_json_content.contains("\"elm-explorations/test\": \"1") {
-            "elm-test@0.19.1-revision9"
-        } else {
-            "elm-test"
-        };
+    let elm_test_version: &'static str = if requires_elm_test_1 {
+        "elm-test@0.19.1-revision9"
+    } else {
+        "elm-test"
+    };
 
     let run_tests_with = |compiler| {
         let elm_stuff: PathBuf = path.join("elm-stuff");
