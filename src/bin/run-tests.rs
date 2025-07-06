@@ -390,7 +390,8 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
         } else {
             match std::env::var("ELM_TEST_RS_PATH") {
                 Ok(path) => Command::new(path),
-                Err(_) => {
+                Err(std::env::VarError::NotUnicode(str)) => Command::new(str),
+                Err(std::env::VarError::NotPresent) => {
                     let mut cmd: Command = Command::new("npx");
                     cmd.args(["--yes", "elm-test-rs"]);
                     cmd
