@@ -235,7 +235,7 @@ fn ui_thread(
 fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
     let dones: std::sync::MutexGuard<'_, Vec<Done>> =
         dones.lock().expect("Could not lock \"dones\"");
-    let mut file: fs::File = std::fs::File::open("export.txt")?;
+    let mut file: fs::File = std::fs::File::create("export.txt")?;
     for done in dones.iter() {
         let result = match (done.elm_result, done.lamdera_result) {
             (RunResult::Finished(true), RunResult::Finished(true)) => continue,
@@ -246,7 +246,7 @@ fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
             (RunResult::Finished(false), RunResult::Finished(true)) => "Lamdera failed",
             (RunResult::Finished(true), RunResult::Finished(false)) => "Elm failed",
         };
-        write!(file, "{}: {}", done.path.display(), result);
+        write!(file, "{}: {}\n", done.path.display(), result)?;
     }
     Ok(())
 }
