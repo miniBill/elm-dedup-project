@@ -8,7 +8,8 @@ use ratatui::{
 };
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{mpmc, Mutex},
@@ -218,6 +219,7 @@ fn ui_thread(
 
         match crossterm::event::read()? {
             Event::Key(key) => match key.code {
+                crossterm::event::KeyCode::Char('e') => export(dones)?,
                 crossterm::event::KeyCode::Char('q') => return Ok(()),
                 _ => {}
             },
@@ -228,6 +230,25 @@ fn ui_thread(
             Event::Resize(_, _) => {}
         }
     }
+}
+
+fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
+    let dones: std::sync::MutexGuard<'_, Vec<Done>> =
+        dones.lock().expect("Could not lock \"dones\"");
+    let mut file: fs::File = std::fs::File::open("export.txt")?;
+    for done in dones.iter() {
+        let result = match (done.elm_result, done.lamdera_result) {
+            (RunResult::Finished(true), RunResult::Finished(true)) => continue,
+            (RunResult::TimedOut, RunResult::Finished(_)) => "Elm timed out",
+            (RunResult::Finished(_), RunResult::TimedOut) => "Lamdera timed out",
+            (RunResult::TimedOut, RunResult::TimedOut) => "Both timed out ",
+            (RunResult::Finished(false), RunResult::Finished(false)) => "Broken tests",
+            (RunResult::Finished(false), RunResult::Finished(true)) => "Lamdera failed",
+            (RunResult::Finished(true), RunResult::Finished(false)) => "Elm failed",
+        };
+        write!(file, "{}: {}", done.path.display(), result);
+    }
+    Ok(())
 }
 
 fn view(
