@@ -380,7 +380,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     let elm_json_content: String = fs::read_to_string(elm_json)?;
     let requires_elm_test_1: bool = elm_json_content.contains("\"elm-explorations/test\": \"1");
 
-    let run_tests_with = |compiler| {
+    let run_tests_with = |compiler: String| {
         let elm_stuff: PathBuf = path.join("elm-stuff");
         if elm_stuff.exists() {
             fs::remove_dir_all(path.join("elm-stuff"))?;
@@ -405,7 +405,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
         };
 
         let mut elm_child: std::process::Child = base_command
-            .args(["--compiler", compiler])
+            .args(["--compiler", &compiler])
             .current_dir(&path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -421,8 +421,10 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
         }
     };
 
-    let elm_result: RunResult = run_tests_with("elm")?;
-    let lamdera_result: RunResult = run_tests_with("lamdera-next-no-wire")?;
+    let elm_result: RunResult =
+        run_tests_with(std::env::var("ELM").unwrap_or_else(|_| "elm".to_string()))?;
+    let lamdera_result: RunResult =
+        run_tests_with(std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string()))?;
 
     return Ok((elm_result, lamdera_result));
 }
