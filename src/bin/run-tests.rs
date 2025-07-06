@@ -265,10 +265,15 @@ fn view(
     let mut done_list: Vec<Done> = dones.iter().map(|done| done.clone()).collect::<Vec<_>>();
     done_list.reverse();
     done_list.sort_by_key(|done| {
-        if done.elm_result != done.lamdera_result {
-            0
-        } else {
-            1
+        match done.elm_result {
+            // First the anomalies
+            _ if done.elm_result != done.lamdera_result => 0,
+            // Then the timeouts
+            RunResult::TimedOut => 1,
+            // Then the errors
+            RunResult::Finished(false) => 2,
+            // Then everything else
+            RunResult::Finished(true) => 3,
         }
     });
     fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
