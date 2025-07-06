@@ -58,15 +58,31 @@ impl From<&'static str> for Error {
 #[derive(Clone)]
 struct Done {
     path: PathBuf,
+    elm_test_version: ElmTestVersion,
     time: Duration,
     elm_result: RunResult,
     lamdera_result: RunResult,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 enum RunResult {
     Finished(bool),
     TimedOut,
+}
+
+#[derive(Clone, Copy)]
+enum ElmTestVersion {
+    V1,
+    V2,
+}
+
+impl std::fmt::Display for ElmTestVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            ElmTestVersion::V1 => f.write_str("1"),
+            ElmTestVersion::V2 => f.write_str("2"),
+        }
+    }
 }
 
 const CONCURRENCY: u16 = 10;
@@ -104,17 +120,19 @@ fn main() -> Result<(), Error> {
                     .expect("Could not lock \"in_progress\"")
                     .insert(version_root.clone(), start);
 
-                let res: Result<(RunResult, RunResult), Error> = check_tests_for(&version_root);
+                let res: Result<(ElmTestVersion, RunResult, RunResult), Error> =
+                    check_tests_for(&version_root);
 
                 in_progress
                     .lock()
                     .expect("Could not lock \"in_progress\"")
                     .remove(&version_root);
 
-                let (elm_result, lamdera_result) = res?;
+                let (elm_test_version, elm_result, lamdera_result) = res?;
 
                 dones.lock().expect("Could not lock \"dones\"").push(Done {
                     path: version_root,
+                    elm_test_version,
                     time: start.elapsed(),
                     elm_result,
                     lamdera_result,
@@ -265,15 +283,18 @@ fn view(
     let mut done_list: Vec<Done> = dones.iter().map(|done| done.clone()).collect::<Vec<_>>();
     done_list.reverse();
     done_list.sort_by_key(|done| {
-        match done.elm_result {
+        match (done.elm_result, done.elm_test_version) {
             // First the anomalies
-            _ if done.elm_result != done.lamdera_result => 0,
+            (_, ElmTestVersion::V2) if done.elm_result != done.lamdera_result => 0,
+            (_, ElmTestVersion::V1) if done.elm_result != done.lamdera_result => 1,
             // Then the timeouts
-            RunResult::TimedOut => 1,
+            (RunResult::TimedOut, ElmTestVersion::V2) => 2,
+            (RunResult::TimedOut, ElmTestVersion::V1) => 3,
             // Then the errors
-            RunResult::Finished(false) => 2,
+            (RunResult::Finished(false), ElmTestVersion::V2) => 4,
+            (RunResult::Finished(false), ElmTestVersion::V1) => 5,
             // Then everything else
-            RunResult::Finished(true) => 3,
+            (RunResult::Finished(true), _) => 6,
         }
     });
     fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
@@ -289,6 +310,7 @@ fn view(
             .map(|done| {
                 widgets::Row::new([
                     text::Line::raw(format!("{}", done.path.display())),
+                    text::Line::raw(format!("{}", done.elm_test_version)).centered(),
                     view_done_result(done.elm_result),
                     view_done_result(done.lamdera_result),
                     text::Line::raw(format!("{}s", done.time.as_secs())).right_aligned(),
@@ -297,12 +319,13 @@ fn view(
             .collect::<Vec<_>>(),
         [
             layout::Constraint::Fill(1),
+            layout::Constraint::Length(8),
             layout::Constraint::Length(7),
             layout::Constraint::Length(7),
             layout::Constraint::Length(10),
         ],
     )
-    .header(widgets::Row::new(["Package", "  Elm  ", "Lamdera", "   Time   "]).yellow())
+    .header(widgets::Row::new(["Package", "elm-test", "  Elm  ", "Lamdera", "   Time   "]).yellow())
     .block(
         widgets::Block::default()
             .title(" Done ")
@@ -374,11 +397,16 @@ fn render_summary(
     frame.render_widget(summary_gauge, summary_sublayout[1]);
 }
 
-fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
+fn check_tests_for(path: &PathBuf) -> Result<(ElmTestVersion, RunResult, RunResult), Error> {
     let elm_json: PathBuf = path.join("elm.json");
 
     let elm_json_content: String = fs::read_to_string(elm_json)?;
-    let requires_elm_test_1: bool = elm_json_content.contains("\"elm-explorations/test\": \"1");
+    let elm_test_version: ElmTestVersion =
+        if elm_json_content.contains("\"elm-explorations/test\": \"1") {
+            ElmTestVersion::V1
+        } else {
+            ElmTestVersion::V2
+        };
 
     let run_tests_with = |compiler: String| {
         let elm_stuff: PathBuf = path.join("elm-stuff");
@@ -388,19 +416,22 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
 
         let timeout: Duration = Duration::from_secs(120);
 
-        let mut base_command = if requires_elm_test_1 {
+        fn via_npx(name: &'static str) -> std::process::Command {
             let mut cmd: Command = Command::new("npx");
-            cmd.args(["--yes", "elm-test@0.19.1-revision9"]);
+            cmd.args(["--yes", name]);
             cmd
-        } else {
-            match std::env::var("ELM_TEST_RS_PATH") {
-                Ok(path) => Command::new(path),
-                Err(std::env::VarError::NotUnicode(str)) => Command::new(str),
-                Err(std::env::VarError::NotPresent) => {
-                    let mut cmd: Command = Command::new("npx");
-                    cmd.args(["--yes", "elm-test-rs"]);
-                    cmd
-                }
+        }
+
+        let mut base_command = match elm_test_version {
+            ElmTestVersion::V1 => via_npx("elm-test@0.19.1-revision9"),
+            ElmTestVersion::V2 => {
+                let mut cmd = match std::env::var("ELM_TEST_RS_PATH") {
+                    Ok(path) => Command::new(path),
+                    Err(std::env::VarError::NotUnicode(str)) => Command::new(str),
+                    Err(std::env::VarError::NotPresent) => via_npx("elm-test-rs"),
+                };
+                cmd.args(["-w", "4"]);
+                cmd
             }
         };
 
@@ -423,13 +454,14 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
 
     let elm_result: RunResult =
         run_tests_with(std::env::var("ELM").unwrap_or_else(|_| "elm".to_string()))?;
-    let lamdera_result: RunResult = run_tests_with(if requires_elm_test_1 {
-        std::env::var("LAMDERA_STABLE").unwrap_or_else(|_| "lamdera".to_string())
-    } else {
-        std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string())
+    let lamdera_result: RunResult = run_tests_with(match elm_test_version {
+        ElmTestVersion::V1 => {
+            std::env::var("LAMDERA_STABLE").unwrap_or_else(|_| "lamdera".to_string())
+        }
+        ElmTestVersion::V2 => std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string()),
     })?;
 
-    return Ok((elm_result, lamdera_result));
+    return Ok((elm_test_version, elm_result, lamdera_result));
 }
 
 fn read_dir<T>(path: T) -> Result<Vec<PathBuf>, Error>
