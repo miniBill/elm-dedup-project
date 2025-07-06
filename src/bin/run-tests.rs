@@ -423,8 +423,11 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
 
     let elm_result: RunResult =
         run_tests_with(std::env::var("ELM").unwrap_or_else(|_| "elm".to_string()))?;
-    let lamdera_result: RunResult =
-        run_tests_with(std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string()))?;
+    let lamdera_result: RunResult = run_tests_with(if requires_elm_test_1 {
+        std::env::var("LAMDERA_STABLE").unwrap_or_else(|_| "lamdera".to_string())
+    } else {
+        std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string())
+    })?;
 
     return Ok((elm_result, lamdera_result));
 }
