@@ -375,12 +375,6 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     let elm_json_content: String = fs::read_to_string(elm_json)?;
     let requires_elm_test_1: bool = elm_json_content.contains("\"elm-explorations/test\": \"1");
 
-    let elm_test_version: &'static str = if requires_elm_test_1 {
-        "elm-test@0.19.1-revision9"
-    } else {
-        "elm-test"
-    };
-
     let run_tests_with = |compiler| {
         let elm_stuff: PathBuf = path.join("elm-stuff");
         if elm_stuff.exists() {
@@ -389,8 +383,23 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
 
         let timeout: Duration = Duration::from_secs(120);
 
-        let mut elm_child: std::process::Child = Command::new("npx")
-            .args(["--yes", elm_test_version, "--compiler", compiler])
+        let mut base_command = if requires_elm_test_1 {
+            let mut cmd: Command = Command::new("npx");
+            cmd.args(["--yes", "elm-test@0.19.1-revision9"]);
+            cmd
+        } else {
+            match std::env::var("ELM_TEST_RS_PATH") {
+                Ok(path) => Command::new(path),
+                Err(_) => {
+                    let mut cmd: Command = Command::new("npx");
+                    cmd.args(["--yes", "elm-test-rs"]);
+                    cmd
+                }
+            }
+        };
+
+        let mut elm_child: std::process::Child = base_command
+            .args(["--compiler", compiler])
             .current_dir(&path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -407,7 +416,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(RunResult, RunResult), Error> {
     };
 
     let elm_result: RunResult = run_tests_with("elm")?;
-    let lamdera_result: RunResult = run_tests_with("lamdera")?;
+    let lamdera_result: RunResult = run_tests_with("lamdera-stable")?;
 
     return Ok((elm_result, lamdera_result));
 }
