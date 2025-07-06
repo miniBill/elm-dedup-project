@@ -241,12 +241,12 @@ fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
             (RunResult::Finished(true), RunResult::Finished(true)) => continue,
             (RunResult::TimedOut, RunResult::Finished(_)) => "Elm timed out",
             (RunResult::Finished(_), RunResult::TimedOut) => "Lamdera timed out",
-            (RunResult::TimedOut, RunResult::TimedOut) => "Both timed out ",
+            (RunResult::TimedOut, RunResult::TimedOut) => "Both timed out",
             (RunResult::Finished(false), RunResult::Finished(false)) => "Broken tests",
-            (RunResult::Finished(false), RunResult::Finished(true)) => "Lamdera failed",
-            (RunResult::Finished(true), RunResult::Finished(false)) => "Elm failed",
+            (RunResult::Finished(false), RunResult::Finished(true)) => "Elm failed",
+            (RunResult::Finished(true), RunResult::Finished(false)) => "Lamdera failed",
         };
-        write!(file, "{}: {}\n", done.path.display(), result)?;
+        write!(file, "{} | {}\n", result, done.path.display())?;
     }
     Ok(())
 }
