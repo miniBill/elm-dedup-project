@@ -289,6 +289,7 @@ fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
     file.write_record(&[
         "Path",
         "Elm-test version",
+        "Elm",
         "Lamdera stable no wire",
         "Lamdera stable",
         "Lamdera next no wire",
@@ -311,6 +312,8 @@ fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
                 elm_result.to_string(),
                 lamdera_stable_no_wire_result.to_string(),
                 lamdera_stable_result.to_string(),
+                "".to_string(),
+                "".to_string(),
             ])?,
             RunResults::V2 {
                 elm_result,
