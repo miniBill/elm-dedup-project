@@ -323,7 +323,7 @@ fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
                 lamdera_next_result,
             } => file.write_record(&[
                 done.path.display().to_string(),
-                "1".to_string(),
+                "2".to_string(),
                 elm_result.to_string(),
                 lamdera_stable_no_wire_result.to_string(),
                 lamdera_stable_result.to_string(),
