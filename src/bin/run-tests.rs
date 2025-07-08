@@ -488,13 +488,27 @@ fn view(
             .collect::<Vec<_>>(),
         [
             layout::Constraint::Fill(1),
-            layout::Constraint::Length(8),
-            layout::Constraint::Length(7),
-            layout::Constraint::Length(7),
+            layout::Constraint::Length(10),
+            layout::Constraint::Length(10),
+            layout::Constraint::Length(10),
+            layout::Constraint::Length(10),
+            layout::Constraint::Length(10),
             layout::Constraint::Length(10),
         ],
     )
-    .header(widgets::Row::new(["Package", "elm-test", "  Elm  ", "Lamdera", "   Time   "]).yellow())
+    .header(
+        widgets::Row::new([
+            text::Line::raw("Package").centered(),
+            text::Line::raw("elm-test").centered(),
+            text::Line::raw("Elm").centered(),
+            text::Line::raw("Λ Stab").centered(),
+            text::Line::raw("Λ Stab ⚡").centered(),
+            text::Line::raw("Λ Next").centered(),
+            text::Line::raw("Λ Next ⚡").centered(),
+            text::Line::raw("Time").centered(),
+        ])
+        .yellow(),
+    )
     .block(
         widgets::Block::default()
             .title(" Done ")
