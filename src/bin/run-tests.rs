@@ -9,7 +9,7 @@ use ratatui::{
 use std::{
     collections::HashMap,
     fs,
-    io::{self, Write},
+    io::{self},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{mpmc, Mutex},
@@ -23,12 +23,19 @@ enum Error {
     IO(io::Error),
     SendPath(mpmc::SendError<PathBuf>),
     ColorEyre(color_eyre::Report),
+    CSV(csv::Error),
     Other(String),
 }
 
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Error::IO(e)
+    }
+}
+
+impl From<csv::Error> for Error {
+    fn from(e: csv::Error) -> Self {
+        Error::CSV(e)
     }
 }
 
@@ -59,16 +66,40 @@ impl From<&'static str> for Error {
 #[derive(Clone)]
 struct Done {
     path: PathBuf,
-    elm_test_version: ElmTestVersion,
     time: Duration,
-    elm_result: RunResult,
-    lamdera_result: RunResult,
+    results: RunResults,
+}
+
+#[derive(Clone)]
+enum RunResults {
+    V1 {
+        elm_result: RunResult,
+        lamdera_stable_no_wire_result: RunResult,
+        lamdera_stable_result: RunResult,
+    },
+    V2 {
+        elm_result: RunResult,
+        lamdera_stable_no_wire_result: RunResult,
+        lamdera_stable_result: RunResult,
+        lamdera_next_no_wire_result: RunResult,
+        lamdera_next_result: RunResult,
+    },
 }
 
 #[derive(Clone, Copy, PartialEq)]
 enum RunResult {
     Finished(bool),
     TimedOut,
+}
+
+impl std::fmt::Display for RunResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            RunResult::Finished(true) => f.write_str("✅"),
+            RunResult::Finished(false) => f.write_str("❌"),
+            RunResult::TimedOut => f.write_str("⏰"),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +117,14 @@ impl std::fmt::Display for ElmTestVersion {
     }
 }
 
+struct Compilers {
+    elm: String,
+    lamdera_stable_no_wire: String,
+    lamdera_stable: String,
+    lamdera_next_no_wire: String,
+    lamdera_next: String,
+}
+
 const CONCURRENCY: u16 = 10;
 const FPS: u64 = 20;
 
@@ -95,6 +134,20 @@ fn main() -> Result<(), Error> {
     let in_progress: Mutex<HashMap<PathBuf, Instant>> = Mutex::new(HashMap::new());
     let dones: Mutex<Vec<Done>> = Mutex::new(Vec::new());
     let stopping: Mutex<bool> = Mutex::new(false);
+
+    fn get_with_default(env: &'static str, fallback: &'static str) -> String {
+        std::env::var(env).unwrap_or_else(|_| fallback.to_string())
+    }
+    let compilers = Compilers {
+        elm: get_with_default("ELM", "elm"),
+        lamdera_stable_no_wire: get_with_default(
+            "LAMDERA_STABLE_NO_WIRE",
+            "lamdera-stable-no-wire",
+        ),
+        lamdera_stable: get_with_default("LAMDERA_STABLE", "lamdera-stable"),
+        lamdera_next_no_wire: get_with_default("LAMDERA_NEXT_NO_WIRE", "lamdera-next-no-wire"),
+        lamdera_next: get_with_default("LAMDERA_NEXT", "lamdera-next"),
+    };
 
     thread::scope::<_, Result<(), Error>>(|scope| {
         let walker: ScopedJoinHandle<Result<(), Error>> = scope.spawn(|| {
@@ -121,22 +174,19 @@ fn main() -> Result<(), Error> {
                     .expect("Could not lock \"in_progress\"")
                     .insert(version_root.clone(), start);
 
-                let res: Result<(ElmTestVersion, RunResult, RunResult), Error> =
-                    check_tests_for(&version_root);
+                let results: Result<RunResults, Error> = check_tests_for(&compilers, &version_root);
 
                 in_progress
                     .lock()
                     .expect("Could not lock \"in_progress\"")
                     .remove(&version_root);
 
-                let (elm_test_version, elm_result, lamdera_result) = res?;
+                let results: RunResults = results?;
 
                 dones.lock().expect("Could not lock \"dones\"").push(Done {
                     path: version_root,
-                    elm_test_version,
                     time: start.elapsed(),
-                    elm_result,
-                    lamdera_result,
+                    results,
                 });
             });
             testers.push(tester);
@@ -235,18 +285,49 @@ fn ui_thread(
 fn export(dones: &Mutex<Vec<Done>>) -> Result<(), Error> {
     let dones: std::sync::MutexGuard<'_, Vec<Done>> =
         dones.lock().expect("Could not lock \"dones\"");
-    let mut file: fs::File = std::fs::File::create("export.txt")?;
+    let mut file = csv::Writer::from_path("export.csv")?;
+    file.write_record(&[
+        "Path",
+        "Elm-test version",
+        "Lamdera stable no wire",
+        "Lamdera stable",
+        "Lamdera next no wire",
+        "Lamdera next",
+    ])?;
     for done in dones.iter() {
-        let result = match (done.elm_result, done.lamdera_result) {
-            (RunResult::Finished(true), RunResult::Finished(true)) => continue,
-            (RunResult::TimedOut, RunResult::Finished(_)) => "Elm timed out",
-            (RunResult::Finished(_), RunResult::TimedOut) => "Lamdera timed out",
-            (RunResult::TimedOut, RunResult::TimedOut) => "Both timed out",
-            (RunResult::Finished(false), RunResult::Finished(false)) => "Broken tests",
-            (RunResult::Finished(false), RunResult::Finished(true)) => "Elm failed",
-            (RunResult::Finished(true), RunResult::Finished(false)) => "Lamdera failed",
-        };
-        write!(file, "{} | {}\n", result, done.path.display())?;
+        match done.results {
+            RunResults::V1 {
+                elm_result: RunResult::Finished(true),
+                lamdera_stable_no_wire_result: RunResult::Finished(true),
+                lamdera_stable_result: RunResult::Finished(true),
+            } => continue,
+            RunResults::V1 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+            } => file.write_record(&[
+                done.path.display().to_string(),
+                "1".to_string(),
+                elm_result.to_string(),
+                lamdera_stable_no_wire_result.to_string(),
+                lamdera_stable_result.to_string(),
+            ])?,
+            RunResults::V2 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+                lamdera_next_no_wire_result,
+                lamdera_next_result,
+            } => file.write_record(&[
+                done.path.display().to_string(),
+                "1".to_string(),
+                elm_result.to_string(),
+                lamdera_stable_no_wire_result.to_string(),
+                lamdera_stable_result.to_string(),
+                lamdera_next_no_wire_result.to_string(),
+                lamdera_next_result.to_string(),
+            ])?,
+        }
     }
     Ok(())
 }
@@ -304,38 +385,105 @@ fn view(
     let mut done_list: Vec<Done> = dones.iter().map(|done| done.clone()).collect::<Vec<_>>();
     done_list.reverse();
     done_list.sort_by_key(|done| {
-        match (done.elm_result, done.elm_test_version) {
+        match done.results {
             // First the anomalies
-            (_, ElmTestVersion::V2) if done.elm_result != done.lamdera_result => 0,
-            (_, ElmTestVersion::V1) if done.elm_result != done.lamdera_result => 1,
+            RunResults::V2 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                ..
+            } if elm_result != lamdera_stable_no_wire_result => 0,
+            RunResults::V2 {
+                elm_result,
+                lamdera_next_no_wire_result,
+                ..
+            } if elm_result != lamdera_next_no_wire_result => 1,
+            RunResults::V1 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                ..
+            } if elm_result != lamdera_stable_no_wire_result => 2,
+            // Then the wire errors
+            RunResults::V2 {
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+                ..
+            } if lamdera_stable_no_wire_result != lamdera_stable_result => 3,
+            RunResults::V2 {
+                lamdera_next_no_wire_result,
+                lamdera_next_result,
+                ..
+            } if lamdera_next_no_wire_result != lamdera_next_result => 4,
+            RunResults::V1 {
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+                ..
+            } if lamdera_stable_no_wire_result != lamdera_stable_result => 5,
             // Then the timeouts
-            (RunResult::TimedOut, ElmTestVersion::V2) => 2,
-            (RunResult::TimedOut, ElmTestVersion::V1) => 3,
+            RunResults::V2 {
+                elm_result: RunResult::TimedOut,
+                ..
+            } => 6,
+            RunResults::V1 {
+                elm_result: RunResult::TimedOut,
+                ..
+            } => 7,
             // Then the errors
-            (RunResult::Finished(false), ElmTestVersion::V2) => 4,
-            (RunResult::Finished(false), ElmTestVersion::V1) => 5,
+            RunResults::V2 {
+                elm_result: RunResult::Finished(false),
+                ..
+            } => 8,
+            RunResults::V1 {
+                elm_result: RunResult::Finished(false),
+                ..
+            } => 9,
             // Then everything else
-            (RunResult::Finished(true), _) => 6,
+            RunResults::V2 {
+                elm_result: RunResult::Finished(true),
+                ..
+            } => 10,
+            RunResults::V1 {
+                elm_result: RunResult::Finished(true),
+                ..
+            } => 11,
         }
     });
     fn view_done_result<'a>(result: RunResult) -> ratatui::prelude::Line<'a> {
-        match result {
-            RunResult::Finished(true) => text::Line::raw("✅").centered(),
-            RunResult::Finished(false) => text::Line::raw("❌").centered(),
-            RunResult::TimedOut => text::Line::raw("⏰").centered(),
-        }
+        text::Line::raw(result.to_string()).centered()
     }
     let done_table: widgets::Table<'_> = widgets::Table::new(
         done_list
             .into_iter()
-            .map(|done| {
-                widgets::Row::new([
+            .map(|done| match done.results {
+                RunResults::V1 {
+                    elm_result,
+                    lamdera_stable_no_wire_result,
+                    lamdera_stable_result,
+                } => widgets::Row::new([
                     text::Line::raw(format!("{}", done.path.display())),
-                    text::Line::raw(format!("{}", done.elm_test_version)).centered(),
-                    view_done_result(done.elm_result),
-                    view_done_result(done.lamdera_result),
+                    text::Line::raw(format!("{}", ElmTestVersion::V1)).centered(),
+                    view_done_result(elm_result),
+                    view_done_result(lamdera_stable_no_wire_result),
+                    view_done_result(lamdera_stable_result),
+                    text::Line::raw(""),
+                    text::Line::raw(""),
                     text::Line::raw(format!("{}s", done.time.as_secs())).right_aligned(),
-                ])
+                ]),
+                RunResults::V2 {
+                    elm_result,
+                    lamdera_stable_no_wire_result,
+                    lamdera_stable_result,
+                    lamdera_next_no_wire_result,
+                    lamdera_next_result,
+                } => widgets::Row::new([
+                    text::Line::raw(format!("{}", done.path.display())),
+                    text::Line::raw(format!("{}", ElmTestVersion::V2)).centered(),
+                    view_done_result(elm_result),
+                    view_done_result(lamdera_stable_no_wire_result),
+                    view_done_result(lamdera_stable_result),
+                    view_done_result(lamdera_next_no_wire_result),
+                    view_done_result(lamdera_next_result),
+                    text::Line::raw(format!("{}s", done.time.as_secs())).right_aligned(),
+                ]),
             })
             .collect::<Vec<_>>(),
         [
@@ -418,7 +566,7 @@ fn render_summary(
     frame.render_widget(summary_gauge, summary_sublayout[1]);
 }
 
-fn check_tests_for(path: &PathBuf) -> Result<(ElmTestVersion, RunResult, RunResult), Error> {
+fn check_tests_for(compilers: &Compilers, path: &PathBuf) -> Result<RunResults, Error> {
     let elm_json: PathBuf = path.join("elm.json");
 
     let elm_json_content: String = fs::read_to_string(elm_json)?;
@@ -429,7 +577,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(ElmTestVersion, RunResult, RunResu
             ElmTestVersion::V2
         };
 
-    let run_tests_with = |compiler: String| {
+    let run_tests_with = |compiler: &String| {
         let elm_stuff: PathBuf = path.join("elm-stuff");
         if elm_stuff.exists() {
             fs::remove_dir_all(path.join("elm-stuff"))?;
@@ -457,7 +605,7 @@ fn check_tests_for(path: &PathBuf) -> Result<(ElmTestVersion, RunResult, RunResu
         };
 
         let mut elm_child: std::process::Child = base_command
-            .args(["--compiler", &compiler])
+            .args(["--compiler", compiler])
             .current_dir(&path)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -473,16 +621,41 @@ fn check_tests_for(path: &PathBuf) -> Result<(ElmTestVersion, RunResult, RunResu
         }
     };
 
-    let elm_result: RunResult =
-        run_tests_with(std::env::var("ELM").unwrap_or_else(|_| "elm".to_string()))?;
-    let lamdera_result: RunResult = run_tests_with(match elm_test_version {
+    match elm_test_version {
         ElmTestVersion::V1 => {
-            std::env::var("LAMDERA_STABLE").unwrap_or_else(|_| "lamdera".to_string())
-        }
-        ElmTestVersion::V2 => std::env::var("LAMDERA").unwrap_or_else(|_| "lamdera".to_string()),
-    })?;
+            let elm_result: RunResult = run_tests_with(&compilers.elm)?;
+            let lamdera_stable_no_wire_result: RunResult =
+                run_tests_with(&compilers.lamdera_stable_no_wire)?;
+            let lamdera_stable_result: RunResult = run_tests_with(&compilers.lamdera_stable)?;
 
-    return Ok((elm_test_version, elm_result, lamdera_result));
+            let results: RunResults = RunResults::V1 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+            };
+
+            return Ok(results);
+        }
+        ElmTestVersion::V2 => {
+            let elm_result: RunResult = run_tests_with(&compilers.elm)?;
+            let lamdera_stable_no_wire_result: RunResult =
+                run_tests_with(&compilers.lamdera_stable_no_wire)?;
+            let lamdera_stable_result: RunResult = run_tests_with(&compilers.lamdera_stable)?;
+            let lamdera_next_no_wire_result: RunResult =
+                run_tests_with(&compilers.lamdera_next_no_wire)?;
+            let lamdera_next_result: RunResult = run_tests_with(&compilers.lamdera_next)?;
+
+            let results: RunResults = RunResults::V2 {
+                elm_result,
+                lamdera_stable_no_wire_result,
+                lamdera_stable_result,
+                lamdera_next_no_wire_result,
+                lamdera_next_result,
+            };
+
+            return Ok(results);
+        }
+    }
 }
 
 fn read_dir<T>(path: T) -> Result<Vec<PathBuf>, Error>
