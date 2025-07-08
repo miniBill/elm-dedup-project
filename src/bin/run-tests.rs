@@ -226,8 +226,8 @@ fn main() -> Result<(), Error> {
 fn walk_path(stopping: &Mutex<bool>, paths_sender: &mpmc::Sender<PathBuf>) -> Result<(), Error> {
     let repos = Path::new("repos");
     for author_root in read_dir(&repos)? {
-        for package_root in read_dir(author_root)? {
-            for version_root in read_dir(package_root)? {
+        for package_root in read_dir(&author_root)? {
+            for version_root in read_dir(&package_root)? {
                 if *stopping.lock().expect("Could not lock \"stopping\"") {
                     return Ok(());
                 }
@@ -613,7 +613,7 @@ fn check_tests_for(compilers: &Compilers, path: &PathBuf) -> Result<RunResults, 
                     Err(std::env::VarError::NotUnicode(str)) => Command::new(str),
                     Err(std::env::VarError::NotPresent) => via_npx("elm-test-rs"),
                 };
-                cmd.args(["-w", "4"]);
+                cmd.args(["--workers", "4"]);
                 cmd
             }
         };
